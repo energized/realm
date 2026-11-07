@@ -11,9 +11,9 @@ local chapterRows, stepRows, optBtns = {}, {}, {}
 
 local OPTIONS = {
   { "autoAccept", "Auto accept quests", "Accepts route quests when you open a quest giver." },
-  { "autoTurnin", "Auto hand in quests", "Hands in finished route quests." },
+  { "autoTurnin", "Auto hand in quests", "Hands in every finished quest you are on, route or not." },
   { "smartReward", "Smart reward pick", "Picks the best upgrade for you, or the best vendor price." },
-  { "offRoute", "Also accept off-route quests", "Automation is not limited to route quests." },
+  { "offRoute", "Also accept off-route quests", "Auto accept also takes quests that are not on your route. Off by default. Hand-in is not affected." },
   { "banner", "Quest ready banner", "Message when a quest is ready to hand in." },
   { "corpse", "Compass points to corpse", "While you are a ghost." },
   { "levelTips", "Level up reminders", "Chat hint on level up." },

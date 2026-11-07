@@ -46,9 +46,7 @@ end
 local retries = 0
 local function TurnIn()
   if not On("autoTurnin") or Held() then return end
-  local qid = GetQuestID and GetQuestID()
-  local title = GetTitleText and GetTitleText()
-  if not Wanted(qid, title) then return end
+  -- hand-in covers every quest you are on; "also accept off-route quests" only governs accepting
   local n = GetNumQuestChoices and GetNumQuestChoices() or 0
   local idx = 0
   if n == 1 then idx = 1
@@ -72,8 +70,21 @@ end
 
 -- ---------------------------------------------------------------- events
 local f = CreateFrame("Frame")
-for _, e in ipairs({ "GOSSIP_SHOW", "QUEST_GREETING", "QUEST_DETAIL", "QUEST_ACCEPT_CONFIRM", "QUEST_PROGRESS", "QUEST_COMPLETE" }) do
+for _, e in ipairs({ "PLAYER_LOGIN", "GOSSIP_SHOW", "QUEST_GREETING", "QUEST_DETAIL", "QUEST_ACCEPT_CONFIRM", "QUEST_PROGRESS", "QUEST_COMPLETE" }) do
   pcall(f.RegisterEvent, f, e)
+end
+
+-- other quest addons also accept and hand in on their own, which makes Realm's settings look broken: say so once
+local OTHERS = { "SmartQuestAutomation", "AutoQuests", "QuickQuest" }
+local function Conflicts()
+  if not (On("autoAccept") or On("autoTurnin")) then return end
+  local loaded = (type(C_AddOns) == "table" and C_AddOns.IsAddOnLoaded) or IsAddOnLoaded
+  if type(loaded) ~= "function" then return end
+  local found = {}
+  for _, n in ipairs(OTHERS) do if loaded(n) then found[#found + 1] = n end end
+  if #found > 0 then
+    Path.Print("another quest addon is also running (" .. table.concat(found, ", ") .. "). It accepts and hands in quests by itself, so Realm's route-only setting cannot limit it. Turn it off in the AddOns list to use Realm alone.")
+  end
 end
 
 local function Gossip()
@@ -81,7 +92,7 @@ local function Gossip()
   local G = C_GossipInfo
   if G and G.GetActiveQuests and On("autoTurnin") then
     for _, q in ipairs(G.GetActiveQuests() or {}) do
-      if q.isComplete and Wanted(q.questID, q.title) then G.SelectActiveQuest(q.questID) return end
+      if q.isComplete then G.SelectActiveQuest(q.questID) return end
     end
   end
   if G and G.GetAvailableQuests and On("autoAccept") then
@@ -96,7 +107,7 @@ local function Greeting()
   if On("autoTurnin") and GetNumActiveQuests then
     for i = 1, GetNumActiveQuests() do
       local title, complete = GetActiveTitle(i)
-      if complete and Wanted(nil, title) then SelectActiveQuest(i) return end
+      if complete then SelectActiveQuest(i) return end
     end
   end
   if On("autoAccept") and GetNumAvailableQuests then
@@ -109,7 +120,8 @@ end
 
 f:SetScript("OnEvent", function(_, e)
   if not Path.Opts() then return end
-  if e == "GOSSIP_SHOW" then Gossip()
+  if e == "PLAYER_LOGIN" then C_Timer.After(8, Conflicts)
+  elseif e == "GOSSIP_SHOW" then Gossip()
   elseif e == "QUEST_GREETING" then Greeting()
   elseif e == "QUEST_DETAIL" then
     if On("autoAccept") and not Held() and Wanted(GetQuestID and GetQuestID(), GetTitleText and GetTitleText()) then AcceptQuest() end
@@ -117,7 +129,7 @@ f:SetScript("OnEvent", function(_, e)
     if On("autoAccept") and not Held() and ConfirmAcceptQuest then ConfirmAcceptQuest() end
   elseif e == "QUEST_PROGRESS" then
     if On("autoTurnin") and not Held() and IsQuestCompletable and IsQuestCompletable()
-       and Wanted(GetQuestID and GetQuestID(), GetTitleText and GetTitleText()) then CompleteQuest() end
+       then CompleteQuest() end
   elseif e == "QUEST_COMPLETE" then
     retries = 0
     TurnIn()

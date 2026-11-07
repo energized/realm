@@ -343,6 +343,16 @@ function build.settings()
   Toggle("Lock position", "Turn off to drag the bar.", "cdLocked")
   Toggle("Next cast hint", "Shows the game's suggested next spell, if this version offers it.", "cdNext", function() TB.Cooldowns.Refresh() end)
 
+  if TB.Macros then
+    Header("Macros")
+    local autoOn = TB.Macros.AutoOn()
+    Add({ title = "Update macros when I learn skills", desc = "Rebuilds your Realm macros with your newest spells after you learn them or change talents or spec. Off leaves them alone until you run /realm macros.",
+          btn = { autoOn and "ON" or "OFF", function() TB.Macros.SetAuto(not TB.Macros.AutoOn()); Win.Rebuild() end, autoOn and TONE_ON or TONE_OFF },
+          bar = autoOn and { .3, 1, .6 } or { .3, .3, .35 } })
+    Add({ title = "Build my macros now", desc = "Hotbars 1 to 4 and the main bar for your class and spec. Same as /realm macros.",
+          btn = { "Build", function() TB.Macros.Install({}) end } })
+  end
+
   Header("General")
   Add({ title = "Minimap button", btn = { ns.DB.mmHide and "OFF" or "ON", function() TB.Minimap.Toggle(); Win.Rebuild() end,
         ns.DB.mmHide and TONE_OFF or TONE_ON } })

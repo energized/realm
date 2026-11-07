@@ -12,7 +12,7 @@ local DEFAULTS = {
   autoAccept = true, autoTurnin = true, smartReward = true, offRoute = false,
   banner = true, classq = true, corpse = true, levelTips = true,
   trail = true, friends = true, trainers = true, tapWarn = true, farm = false, professions = true,
-  panelMode = "dock", compact = false, boldMarkers = true,
+  panelMode = "dock", compact = false, boldMarkers = true, travelTips = true, travelGuide = true, discoverFlights = false,
   compassWidth = 560, compassScale = 1,
 }
 local O, S           -- options, per-character state

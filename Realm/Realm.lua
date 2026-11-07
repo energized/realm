@@ -25,13 +25,21 @@ end
 ns.Print = Print
 local function Money(c) return GetCoinTextureString and GetCoinTextureString(c) or (c .. "c") end
 
+-- GetItemInfo moved to C_Item on newer clients; the old global can be nil there
+local function ItemPrice(link)
+  local fn = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+  if type(fn) ~= "function" then return nil end
+  local ok, a, b, c, d, e, f, g, h, i, j, price = pcall(fn, link)
+  if ok then return price end
+end
+
 local function SellJunk()
   local total, count = 0, 0
   for bag = 0, 5 do
     for slot = 1, (NumSlots(bag) or 0) do
       local link, quality, stack, noValue = SlotInfo(bag, slot)
       if link and quality == 0 and not noValue then
-        local price = select(11, GetItemInfo(link))
+        local price = ItemPrice(link)
         if price and price > 0 then
           total = total + price * stack
           count = count + 1
@@ -113,11 +121,14 @@ SlashCmdList.REALM = function(msg)
     ns.Tracker.Show()
   elseif msg == "scale" then
     ns.Tracker.SetScale(arg)
+  elseif msg == "macros" or msg == "macro" then
+    if ns.TB and ns.TB.Macros then ns.TB.Macros.Command((full:lower():match("^%s*%S+%s*(.-)%s*$"))) end
   elseif msg == "stats" then
     Print(("This session: sold junk for %s, spent %s on repairs."):format(Money(sessionSold), Money(sessionRepair)))
   else
     Print("Deaths: /realm deaths (or /dl) | /dl total | /dl quiet | /dl reset")
     Print("Commands: /realm sell | repair | guild | quiet | stats")
+    Print("Macros: /realm macros | status | show | spec <name> | force | remove | autoupdate on/off")
     Print("Exchange: /realm ex (market window) | /realm ex help | /realm minimap")
     Print("Tracker: /realm view | pins | names | where | window | track [on/off] | scale <0.7-3>")
     Print(("sell=%s repair=%s guild=%s quiet=%s"):format(tostring(DB.autoSell), tostring(DB.autoRepair), tostring(DB.useGuild), tostring(DB.quiet)))

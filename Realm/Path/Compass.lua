@@ -15,9 +15,9 @@ local bannered
 local C = UI.C
 local COLORS = {
   A = C.gold, T = C.good, D = C.ember, G = C.blue, L = C.cream, R = C.purple,
-  corpse = C.cream, trainer = C.purple, friend = C.blue, farm = C.gold,
+  corpse = C.cream, trainer = C.purple, friend = C.blue, farm = C.gold, travel = C.blue,
 }
-local ICON = { A = "!", T = "?", D = "+", G = ">>", L = "L", R = "R", corpse = "X", trainer = "R", friend = "@", farm = "$" }
+local ICON = { A = "!", T = "?", D = "+", G = ">>", L = "L", R = "R", corpse = "X", trainer = "R", friend = "@", farm = "$", travel = ">>" }
 local VERB = { A = "ACCEPT QUEST", T = "HAND IN QUEST", G = "TRAVEL", L = "LEVEL UP", R = "TRAIN SPELLS" }
 
 local function Secret(v) return issecretvalue and v ~= nil and issecretvalue(v) end
@@ -163,7 +163,7 @@ end
 -- ------------------------------------------------------------ tracking menu
 local menu, menuRows = nil, {}
 local MODES = { { "quest", "Quest route" }, { "free", "My quest log (free mode)" }, { "trainer", "Nearest trainer" }, { "farm", "Farming spot ($)" }, { "friend", "Party member" } }
-local TOGGLES = { { "farm", "Show $ on compass" }, { "friends", "Party dots on compass" }, { "classq", "Class quest alerts" }, { "corpse", "Corpse when dead" }, { "trail", "Dashed trail on minimap" } }
+local TOGGLES = { { "farm", "Show $ on compass" }, { "friends", "Party dots on compass" }, { "classq", "Class quest alerts" }, { "discoverFlights", "Detour to new flight masters" }, { "corpse", "Corpse when dead" }, { "trail", "Dashed trail on minimap" } }
 
 local function RefreshMenu()
   if not menu then return end
@@ -307,6 +307,9 @@ local function Track()
     -- a class quest you can pick up now beats the route
     local cq = Path.ClassPending and Path.ClassPending()
     if cq then return cq end
+    -- the next stop is in another zone: aim at each travel leg in turn
+    local tv = Path.TravelTarget and Path.TravelTarget()
+    if tv then return tv end
     -- nothing left on the route (or no route for you): follow the quests you picked up yourself
     local s = Path.Current()
     if (not s) and Path.FreeTarget then return Path.FreeTarget() end
@@ -367,14 +370,14 @@ local function Resolve()
     end
   end
   if not kind and s then kind, pts, map, label = s.t, s.p, s.m, s.npc end
-  if not kind or not pts or #pts < 2 then target.bearing, target.dist, target.why, target.kind = nil, nil, "none", kind return end
+  if not kind or not pts or #pts < 2 then target.bearing, target.dist, target.why, target.kind, target.map = nil, nil, "none", kind, nil return end
   local bestB, bestD, why
   for i = 1, #pts, 2 do
     local b, d, w = Path.Vector(map, pts[i], pts[i + 1])
     if b and (not bestD or d < bestD) then bestB, bestD = b, d end
     why = w
   end
-  target.bearing, target.dist, target.why, target.kind, target.label = bestB, bestD, (not bestB) and why or nil, kind, label
+  target.bearing, target.dist, target.why, target.kind, target.label, target.map = bestB, bestD, (not bestB) and why or nil, kind, label, map
   if override and override.kind ~= "friend" and bestD and bestD < 25 then override = nil; Path.UpdateHUD() end
 end
 
@@ -491,7 +494,7 @@ local function UpdatePanel()
   if override or tr then
     local ov = override or tr
     local col = COLORS[ov.kind] or C.blue
-    panel.verb:SetText(Hex(col) .. (override and "WAYPOINT" or (ov.class and "CLASS QUEST" or "TRACKING")) .. "|r"); panel.title:SetText(UI.H.cream .. (ov.title or "Target") .. "|r")
+    panel.verb:SetText(Hex(col) .. (override and "WAYPOINT" or (ov.kind == "travel" and "TRAVEL" or (ov.class and "CLASS QUEST" or "TRACKING"))) .. "|r"); panel.title:SetText(UI.H.cream .. (ov.title or "Target") .. "|r")
     panel.sub:SetText(UI.H.muted .. (ov.sub or "Manual waypoint. /path trainer again clears it.") .. "|r")
     panel.accent:SetColorTexture(col[1], col[2], col[3], 1)
     panel.big:SetText(near and (UI.H.good .. "HERE|r") or (UI.H.cream .. dtxt .. "|r"))

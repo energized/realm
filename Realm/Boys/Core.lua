@@ -362,6 +362,8 @@ SlashCmdList["THEBOYS"] = function(msg)
         Print("spec remembered as " .. class.specs[found].name .. ". Once you reach level " .. TB.SPEC_LEVEL .. " it follows your talents.")
       end
     end
+  elseif cmd == "macros" or cmd == "macro" then
+    if TB.Macros then TB.Macros.Command(rest) end
   elseif cmd == "suggest" then
     DB.suggest = not DB.suggest
     Print("upgrade popups " .. (DB.suggest and "on" or "off"))
