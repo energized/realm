@@ -1,0 +1,53 @@
+## Interface: 16001, 120105, 120100, 120007, 50504, 40402, 38002, 20506, 11509
+## Title: |cffe8ab35Realm|r
+## Notes: One addon for everything: a leveling route with a top-centre compass, quest automation and class trainer stops, auto-sell and repair, party tracker, Exchange auction scanner, death counter, and The Boys (gear upgrade popups, class guides, cooldown bar, professions). Replaces Wow Forever, Death Loop and TheBoys.
+## Author: Jonathan
+## Version: 4.7.1
+## SavedVariables: RealmDB, WowForeverDB, DeathLoopDB, TheBoysDB
+## IconTexture: Interface\AddOns\Realm\icon
+## Category: Miscellaneous
+
+Realm.lua
+Theme.lua
+Tracker.lua
+Exchange.lua
+Minimap.lua
+Deaths.lua
+Boys\Core.lua
+Boys\Classes\_Shared.lua
+Boys\Classes\Warrior.lua
+Boys\Classes\Paladin.lua
+Boys\Classes\Hunter.lua
+Boys\Classes\Rogue.lua
+Boys\Classes\Priest.lua
+Boys\Classes\Shaman.lua
+Boys\Classes\Mage.lua
+Boys\Classes\Warlock.lua
+Boys\Classes\Druid.lua
+Boys\Gear.lua
+Boys\Cooldowns.lua
+Boys\Professions.lua
+Boys\Window.lua
+Path\Trainers.lua
+Path\Path.lua
+Path\Free.lua
+Path\ClassQuests.lua
+Path\ClassQuest.lua
+Path\Compass.lua
+Path\Auto.lua
+Path\Target.lua
+Path\Trail.lua
+Path\Friends.lua
+Path\Farm_Data.lua
+Path\Farm.lua
+Path\Window.lua
+Path\ProfData.lua
+Path\Professions.lua
+Path\Route_Human.lua
+Path\Route_Dwarf.lua
+Path\Route_Gnome.lua
+Path\Route_NightElf.lua
+Path\Route_Orc.lua
+Path\Route_Troll.lua
+Path\Route_Scourge.lua
+Path\Route_Tauren.lua

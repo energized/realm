@@ -1,0 +1,110 @@
+local ADDON, ns = ...
+local TB = ns.TB
+local Wt = TB.Weights
+
+local def = {
+  name = "Warrior", color = "ffc79c6e", accent = { .78, .61, .43 }, extrasTitle = "Stances and shouts",
+  specOrder = { "ARMS", "FURY", "PROTECTION" }, defaultSpec = "FURY",
+  gear = {
+    armorSubclasses = { [0] = true, [4] = true, [6] = true }, lowArmor = { 3, 40 },
+    weaponSubclasses = { [0] = true, [1] = true, [4] = true, [5] = true, [6] = true, [7] = true, [8] = true, [10] = true, [13] = true, [15] = true,
+                         [2] = true, [3] = true, [18] = true, [16] = true },
+    dualWield = true, shield = true, ranged = true, thrown = true,
+  },
+  specs = {
+    ARMS = {
+      name = "Arms", role = "DPS",
+      summary = "Two-handed melee. Mortal Strike is your core hit, Rend and Overpower add steady damage, and Execute finishes. The new Spearing Strike hits hard against giants, dragonkin and mounted foes.",
+      statPriority = "Attack Power > Strength > Crit > Hit",
+      weights = Wt("melee", { STR = 2, DPS = 14 }),
+      opener = { "Battle Stance, Battle Shout, Charge in.", "Rend, then Mortal Strike on cooldown.", "Overpower when they dodge, Execute at low health." },
+      priority = {
+        { "Battle Shout", "Keep it on you and the group." },
+        { "Death Wish", "Burst damage window." },
+        { "Recklessness", "Big crit burst, short cooldown window." },
+        { "Mortal Strike", "Your main hit. On cooldown." },
+        { "Rend", "Keep the bleed up on the target." },
+        { "Overpower", "Use after a dodge. Free damage." },
+        { "Spearing Strike", "New Arms talent. Big against giants, dragonkin and mounted foes." },
+        { "Whirlwind", "Hit everything near you." },
+        { "Execute", "Spam it below 20% health." },
+        { "Heroic Strike", "Rage dump on your next swing." },
+      },
+      aoe = { { "Sweeping Strikes", "Cleave your hits to a second target." }, { "Whirlwind", "Hits several targets." }, { "Cleave", "Rage dump on groups." } },
+      cooldowns = {
+        { "Death Wish", "burst", "Damage window." }, { "Recklessness", "burst", "Crit window." },
+        { "Sweeping Strikes", "burst", "Cleave on demand." }, { "Bloodrage", "burst", "Instant rage." },
+        { "Retaliation", "defensive", "Counter attackers." }, { "Intimidating Shout", "utility", "Fear a group." },
+      },
+      tips = { "Use Overpower whenever it lights up.", "Do not overcap rage.", "Execute is your best finisher.", "Pummel or Shield Bash interrupts." },
+    },
+    FURY = {
+      name = "Fury", role = "DPS",
+      summary = "Dual-wield damage. Bloodthirst and Whirlwind are your core, Slam fills with a fast weapon, and Boundless Rage is a new talent that boosts your rage. Execute at low health.",
+      statPriority = "Attack Power > Hit > Crit > Strength",
+      weights = Wt("melee", { STR = 2, HIT = 1.4, TIP_HIT = 14, DPS = 14 }),
+      opener = { "Battle Stance, Battle Shout, Charge.", "Bloodthirst and Whirlwind on cooldown.", "Death Wish and Recklessness in your window." },
+      priority = {
+        { "Battle Shout", "Keep it on the group." },
+        { "Death Wish", "Big damage window." },
+        { "Recklessness", "Crit burst." },
+        { "Bloodthirst", "Main hit. On cooldown." },
+        { "Whirlwind", "On cooldown. Hits everything near you." },
+        { "Slam", "Filler with a fast weapon." },
+        { "Execute", "Spam it below 20% health." },
+        { "Heroic Strike", "Rage dump." },
+        { "Berserker Rage", "Rage when enraged and breaks fear." },
+      },
+      aoe = { { "Whirlwind", "Hits several targets." }, { "Cleave", "Rage dump on groups." }, { "Sweeping Strikes", "Cleave if you have it." } },
+      cooldowns = {
+        { "Death Wish", "burst", "Damage window." }, { "Recklessness", "burst", "Crit window." },
+        { "Bloodrage", "burst", "Instant rage." }, { "Berserker Rage", "burst", "Rage and fear break." },
+        { "Intimidating Shout", "utility", "Fear a group." }, { "Retaliation", "defensive", "Counter attackers." },
+      },
+      tips = { "Hit cap matters for dual wielding.", "Keep Bloodthirst and Whirlwind on cooldown.", "Do not overcap rage.", "Pummel interrupts." },
+    },
+    PROTECTION = {
+      name = "Protection", role = "Tank",
+      summary = "Shield tank. Shield Slam and Revenge generate threat, Sunder Armor stacks, and your big cooldowns handle spikes. You block and parry, unlike Druid tanks.",
+      statPriority = "Stamina > Defense > Armor > Block Value > Dodge/Parry",
+      weights = Wt("tank", { STA = 1.3, DEF = 4, BLOCKV = 1.5 }),
+      opener = { "Defensive Stance, shield up, Battle Shout.", "Charge or Taunt to pull.", "Shield Slam, Revenge, Sunder Armor, Heroic Strike." },
+      priority = {
+        { "Defensive Stance", "Stay in it." },
+        { "Shield Slam", "On cooldown. Best threat." },
+        { "Revenge", "Use after you dodge, parry or block." },
+        { "Sunder Armor", "Stack it for armor and threat." },
+        { "Devastate", "Threat builder." },
+        { "Shield Block", "Active mitigation. Use on big hits." },
+        { "Thunder Clap", "Slow and threat on groups." },
+        { "Demoralizing Shout", "Reduces attack power around you." },
+        { "Heroic Strike", "Rage dump for threat." },
+        { "Taunt", "Force an enemy back on you." },
+      },
+      aoe = { { "Thunder Clap", "Group threat." }, { "Challenging Shout", "Force everything to hit you." }, { "Cleave", "Rage dump on groups." } },
+      cooldowns = {
+        { "Shield Wall", "defensive", "Big damage reduction." }, { "Last Stand", "defensive", "Extra health." },
+        { "Shield Block", "defensive", "Active mitigation." }, { "Challenging Shout", "utility", "Emergency group taunt." },
+        { "Bloodrage", "burst", "Instant rage." }, { "Concussion Blow", "utility", "Stun." },
+      },
+      tips = { "Block value and defense both matter, and so does your health pool.", "Keep Sunder Armor stacked.", "Taunt is for emergencies.", "Shield Bash interrupts." },
+    },
+  },
+  utility = {
+    { "Charge", "utility", "Gap closer." }, { "Intercept", "utility", "Charge in Berserker Stance." },
+    { "Intimidating Shout", "utility", "Fear a group." }, { "Pummel", "utility", "Interrupt." },
+    { "Shield Bash", "utility", "Interrupt with a shield." }, { "Berserker Rage", "utility", "Breaks fear." },
+    { "Hamstring", "utility", "Slow a target." }, { "Disarm", "utility", "Remove an enemy's weapon." },
+    { "Battle Shout", "utility", "Attack power buff." }, { "Taunt", "utility", "Force one enemy to hit you." },
+    { "Shield Wall", "defensive", "Big damage reduction." }, { "Last Stand", "defensive", "Extra health." },
+    { "Retaliation", "defensive", "Counter attackers." },
+  },
+  extras = {
+    "Battle Stance: damage and most abilities. Defensive Stance: tanking. Berserker Stance: Fury utility.",
+    "Rage is your resource. Bloodrage and being hit give you more.",
+    "Charge is a gap closer; Intercept is its Berserker Stance version.",
+    "Warriors wear mail until level 40, then plate.",
+  },
+}
+TB.UseStdPro(def, "plate")
+TB.RegisterClass("WARRIOR", def)
