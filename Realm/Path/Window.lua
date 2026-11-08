@@ -1,4 +1,4 @@
--- Route window: zones, what is coming up, and the option switches.
+-- Route window: zones and the option switches. Upcoming steps live on the compass.
 local ADDON, ns = ...
 local Path = ns.Path
 local UI = ns.UI
@@ -7,7 +7,7 @@ local C = UI.C
 Path.Window = {}
 local W = Path.Window
 local f
-local chapterRows, stepRows, optBtns = {}, {}, {}
+local chapterRows, optBtns = {}, {}
 
 local OPTIONS = {
   { "autoAccept", "Auto accept quests", "Accepts route quests when you open a quest giver." },
@@ -22,6 +22,9 @@ local OPTIONS = {
   { "friends", "Party on compass", "Shows party members from the Party tracker." },
   { "tapWarn", "TAKEN tag", "Warns when your target is already tagged." },
   { "farm", "Farming spots ($)", "Shows the best nearby grinding spot when you have no quest." },
+  { "dungeonTips", "Nearby dungeon hints", "Chat hint when a dungeon that fits you and your group is close. /path dungeon lists them and points the compass at the best one." },
+  { "innTips", "Inn and hearthstone hints", "Suggests the inn to make your home in the zones your route takes you to, and tells you when the hearthstone beats walking to the next quest step. /path inn and /path hearth show the numbers." },
+  { "npcMarker", "Quest NPC marker", "A bobbing ! or ? over the quest NPC's nameplate once the compass says HERE. Needs friendly NPC nameplates switched on." },
   { "professions", "Professions helper", "New-class profession picker, trainer stops, and level-up detours." },
   { "compact", "Compact info window", "A shorter info window under the compass." },
   { "boldMarkers", "Large compass markers", "Filled, thicker markers that are easy to spot at a glance." },
@@ -31,7 +34,7 @@ local OPTIONS = {
 
 local function Build()
   f = CreateFrame("Frame", "RealmPathWindow", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-  f:SetSize(560, 704); f:SetPoint("CENTER"); f:SetFrameStrata("HIGH")
+  f:SetSize(560, 584); f:SetPoint("CENTER"); f:SetFrameStrata("HIGH")
   f:SetMovable(true); f:EnableMouse(true); f:RegisterForDrag("LeftButton"); f:SetClampedToScreen(true)
   f:SetScript("OnDragStart", f.StartMoving); f:SetScript("OnDragStop", f.StopMovingOrSizing)
   UI.Skin(f)
@@ -57,17 +60,11 @@ local function Build()
     r:SetPoint("TOPLEFT", 22, -84 - (i - 1) * 16); r:SetWidth(520); r:SetJustifyH("LEFT")
     chapterRows[i] = r
   end
-  Header("Coming up", -222)
-  for i = 1, 10 do
-    local r = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    r:SetPoint("TOPLEFT", 22, -244 - (i - 1) * 15); r:SetWidth(520); r:SetJustifyH("LEFT")
-    stepRows[i] = r
-  end
-  Header("Options", -408)
+  Header("Options", -224)
   for i, o in ipairs(OPTIONS) do
     local col, row = (i - 1) % 2, math.floor((i - 1) / 2)
     local b = CreateFrame("Button", nil, f)
-    b:SetSize(258, 22); b:SetPoint("TOPLEFT", 16 + col * 268, -430 - row * 26)
+    b:SetSize(258, 22); b:SetPoint("TOPLEFT", 16 + col * 268, -246 - row * 26)
     UI.Button(b)
     b.t = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.t:SetPoint("LEFT", 8, 0); b.t:SetText(o[2])
     b.v = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.v:SetPoint("RIGHT", -8, 0)
@@ -118,11 +115,6 @@ function W.Refresh()
       if c.exit and c.exit > 0 and lvl >= c.exit then mark = "  " .. UI.H.muted .. "done|r" end
       r:SetText(("%d. %s  %s(levels %s)|r%s"):format(i, c.name, UI.H.muted, c.hint, mark)); r:Show()
     else r:Hide() end
-  end
-  local up = Path.Upcoming(10)
-  for i, r in ipairs(stepRows) do
-    local e = up[i]
-    if e then r:SetText(Path.StepText(e[1])); r:Show() else r:Hide() end
   end
   for i, b in ipairs(optBtns) do
     local def = OPTIONS[i]

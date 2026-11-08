@@ -159,6 +159,20 @@ function Path.TravelPlan(from, to)
   return Lines(fast), (usesFly and walk) and Lines(walk) or nil
 end
 
+-- Rough seconds to get from one zone to another by the cheapest chain of links (the inn and hearthstone planner
+-- uses it). Each hop is a flat guess: walking into the next zone, a tram, a boat, a zeppelin or a flight.
+-- nil when the zones are not connected in the table.
+local LEG_SECONDS = { walk = 150, tram = 150, boat = 240, zep = 240, fly = 240 }
+function Path.TravelSeconds(from, to)
+  if not from or not to then return nil end
+  if from == to then return 0 end
+  local chain = Dijkstra(from, to, Faction(), Known())
+  if not chain then return nil end
+  local s = 0
+  for _, c in ipairs(chain) do s = s + (LEG_SECONDS[c.l[3]] or 150) end
+  return s
+end
+
 local function PlayerMap()
   if not (C_Map and C_Map.GetBestMapForUnit) then return nil end
   local ok, m = pcall(C_Map.GetBestMapForUnit, "player")
@@ -303,6 +317,7 @@ function Path.TravelTarget()
   if O.discoverFlights and FM[from] and not Known()[from] and not skipped[from] and HUB[from] then
     local hp = HUB[from]
     return { kind = "travel", p = { hp[1], hp[2] }, m = from,
+             mode = "fly",
              title = "Find the flight master in " .. Nm(from),
              sub = "Optional detour: open its map once so Realm can route flights from here. /path flights skip to skip." }
   end
@@ -323,7 +338,7 @@ function Path.TravelTarget()
   lastIdx = idx
   return { kind = "travel", p = pt and { pt[1], pt[2] } or {}, m = map,
            title = Short(c), sub = ("Step %d of %d.  %s"):format(idx, journey.total, StepText(c)),
-           step = idx, total = journey.total }
+           step = idx, total = journey.total, mode = c.l[3] }
 end
 
 -- ------------------------------------------------------------ remember the flight masters you have found

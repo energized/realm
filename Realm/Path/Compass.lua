@@ -15,9 +15,23 @@ local bannered
 local C = UI.C
 local COLORS = {
   A = C.gold, T = C.good, D = C.ember, G = C.blue, L = C.cream, R = C.purple,
-  corpse = C.cream, trainer = C.purple, friend = C.blue, farm = C.gold, travel = C.blue,
+  corpse = C.cream, trainer = C.purple, friend = C.blue, farm = C.gold, travel = C.blue, dungeon = C.purple, inn = C.ember,
 }
-local ICON = { A = "!", T = "?", D = "+", G = ">>", L = "L", R = "R", corpse = "X", trainer = "R", friend = "@", farm = "$", travel = ">>" }
+local ICON = { A = "!", T = "?", D = "+", G = ">>", L = "L", R = "R", corpse = "X", trainer = "R", friend = "@", farm = "$", travel = ">>", dungeon = "#", inn = "H" }
+-- travel-mode pictures (white silhouettes the game tints): tram, boat, zeppelin, flight master, flying yourself, footprints for walking
+local TEXDIR = "Interface\\AddOns\\Realm\\Path\\icons\\"
+local MODETEX = { tram = "tram", boat = "boat", zep = "zep", fly = "fly", flyself = "flyself", walk = "walk" }
+-- which picture to show for the current travel target, or nil to keep the text glyph.
+-- When you are flying yourself (in the air, or mounted where flying is allowed on a walking leg) it shows the rider.
+local function ModeIcon()
+  if target.kind ~= "travel" or not target.mode then return nil end
+  local m = target.mode
+  local flying = IsFlying and IsFlying()
+  local canFly = IsMounted and IsMounted() and IsFlyableArea and IsFlyableArea()
+  if (m == "walk" and (flying or canFly)) or (m == "fly" and flying) then m = "flyself" end
+  return MODETEX[m]
+end
+Path.ModeIcon = ModeIcon
 local VERB = { A = "ACCEPT QUEST", T = "HAND IN QUEST", G = "TRAVEL", L = "LEVEL UP", R = "TRAIN SPELLS" }
 
 local function Secret(v) return issecretvalue and v ~= nil and issecretvalue(v) end
@@ -94,6 +108,8 @@ local function Build()
   marker.icon = marker:CreateFontString(nil, "OVERLAY", "GameFontNormal")
   marker.icon:SetPoint("CENTER", marker, "CENTER", 0, 1); Font(marker.icon, 22)
   marker.chip:SetPoint("CENTER", marker.icon, "CENTER", 0, 0)
+  marker.tex = marker:CreateTexture(nil, "OVERLAY")
+  marker.tex:SetSize(24, 24); marker.tex:SetPoint("CENTER", marker.icon, "CENTER", 0, 0); marker.tex:Hide()
   marker.arrowL = marker:CreateFontString(nil, "OVERLAY", "GameFontNormal")
   marker.arrowL:SetPoint("RIGHT", marker.icon, "LEFT", 2, 0); Font(marker.arrowL, 13); marker.arrowL:SetText("<")
   marker.arrowR = marker:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -141,28 +157,36 @@ local function Build()
   panel.prog = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   panel.prog:SetJustifyH("LEFT"); Font(panel.prog, 10, "")
 
-  local function Btn(text, x, fn, tip)
+  -- the button row along the bottom of the info window: skip controls on the left, Track.. / gear / Legend on the right
+  local function Btn(text, w, point, x, fn, tip, icon)
     local b = CreateFrame("Button", nil, panel)
-    b:SetSize(22, 16)
-    b:SetPoint("TOPRIGHT", panel, "TOPRIGHT", x, -6)
+    b:SetSize(w, 20)
+    b:SetPoint(point, panel, point, x, 4)
     UI.Button(b)
-    b.t = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.t:SetPoint("CENTER"); b.t:SetText(text)
+    b.t = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.t:SetPoint("CENTER"); b.t:SetText(icon and "" or text); Font(b.t, 12, "")
+    if icon then
+      b.icon = b:CreateTexture(nil, "OVERLAY"); b.icon:SetSize(18, 18); b.icon:SetPoint("CENTER")
+      b.icon:SetTexture(icon); b.icon:SetVertexColor(C.cream[1], C.cream[2], C.cream[3], 1)
+    end
     b:SetScript("OnClick", fn)
     b:SetScript("OnEnter", function(self)
-      if GameTooltip then GameTooltip:SetOwner(self, "ANCHOR_BOTTOM"); GameTooltip:AddLine(tip); GameTooltip:Show() end
+      if GameTooltip then GameTooltip:SetOwner(self, "ANCHOR_TOP"); GameTooltip:AddLine(tip); GameTooltip:Show() end
     end)
     b:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+    return b
   end
-  Btn("W", -8, function() if Path.Window then Path.Window.Toggle() end end, "Route window and settings")
-  Btn(">", -34, function() Path.Skip() end, "Skip this step")
-  Btn("<", -60, function() Path.Back() end, "Bring back the last skipped step")
-  Btn("T", -86, function() Path.ToggleTrackMenu() end, "What to track")
+  panel.backBtn = Btn("< -1", 40, "BOTTOMLEFT", 14, function() Path.Back() end, "Bring back the last skipped step")
+  panel.stepsBtn = Btn("Skip step", 80, "BOTTOMLEFT", 58, function() Path.ToggleStepList() end, "Show the next steps, click one to go there")
+  panel.skipBtn = Btn("+1 >", 40, "BOTTOMLEFT", 142, function() Path.Skip() end, "Skip this step")
+  panel.gearBtn = Btn("W", 28, "BOTTOMRIGHT", -62, function() if Path.Window then Path.Window.Toggle() end end, "Route window and settings", TEXDIR .. "gear")
+  panel.trackBtn = Btn("Track..", 58, "BOTTOMRIGHT", -94, function() Path.ToggleTrackMenu() end, "What to track")
   BuildLegend()
 end
 
 -- ------------------------------------------------------------ tracking menu
 local menu, menuRows = nil, {}
-local MODES = { { "quest", "Quest route" }, { "free", "My quest log (free mode)" }, { "trainer", "Nearest trainer" }, { "farm", "Farming spot ($)" }, { "friend", "Party member" } }
+local MENU_W, menuWanted, menuNow = 210, false, 0
+local MODES = { { "quest", "Quest route" }, { "free", "My quest log (free mode)" }, { "trainer", "Nearest trainer" }, { "farm", "Farming spot ($)" }, { "dungeon", "Nearby dungeon (fits you)" }, { "inn", "Inn to make home" }, { "friend", "Party member" } }
 local TOGGLES = { { "farm", "Show $ on compass" }, { "friends", "Party dots on compass" }, { "classq", "Class quest alerts" }, { "discoverFlights", "Detour to new flight masters" }, { "corpse", "Corpse when dead" }, { "trail", "Dashed trail on minimap" } }
 
 local function RefreshMenu()
@@ -177,20 +201,25 @@ end
 local function BuildMenu()
   if menu then return end
   menu = CreateFrame("Frame", nil, panel)
-  menu:SetFrameStrata("DIALOG"); menu:SetSize(210, 24 + (#MODES + #TOGGLES) * 22 + 28)
-  menu:SetPoint("TOPRIGHT", panel, "BOTTOMRIGHT", 0, -2)
+  menu:SetFrameStrata("DIALOG"); menu:SetSize(1, 24 + (#MODES + #TOGGLES) * 22 + 28)
+  menu:SetPoint("TOPRIGHT", panel, "TOPLEFT", -2, 0)           -- re-anchored by PlaceMenu
+  if menu.SetClipsChildren then menu:SetClipsChildren(true) end
+  -- the content sits on a fixed-width body so sliding only reveals it, never squeezes it
+  menu.body = CreateFrame("Frame", nil, menu)
+  menu.body:SetSize(MENU_W, 24 + (#MODES + #TOGGLES) * 22 + 28)
+  menu.body:SetPoint("TOPRIGHT", menu, "TOPRIGHT", 0, 0)
   menu.bg = menu:CreateTexture(nil, "BACKGROUND"); menu.bg:SetAllPoints()
   menu.bg:SetColorTexture(C.bg[1], C.bg[2], C.bg[3], .96)
   menu.top = menu:CreateTexture(nil, "BORDER"); menu.top:SetPoint("TOPLEFT"); menu.top:SetPoint("TOPRIGHT"); menu.top:SetHeight(2)
   menu.top:SetColorTexture(C.red[1], C.red[2], C.red[3], 1)
   local function Head(text, y)
-    local h = menu:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local h = menu.body:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     h:SetPoint("TOPLEFT", 10, y); h:SetText(UI.H.gold .. text .. "|r"); Font(h, 11)
   end
   local y = -8
   Head("TRACK (compass and minimap follow it)", y); y = y - 16
   local function Row(label, fn, mode, key)
-    local b = CreateFrame("Button", nil, menu)
+    local b = CreateFrame("Button", nil, menu.body)
     b:SetSize(194, 20); b:SetPoint("TOPLEFT", 8, y); y = y - 22
     UI.Button(b)
     b.t = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.t:SetPoint("LEFT", 8, 0); b.t:SetText(label); Font(b.t, 12, "")
@@ -208,12 +237,131 @@ local function BuildMenu()
     Row(tg[2], function() local O = Path.Opts(); O[tg[1]] = not O[tg[1]] end, nil, tg[1])
   end
   menu:SetHeight(-y + 8)
+  menu.body:SetHeight(-y + 8)
+  menu:SetWidth(1)
   menu:Hide()
+end
+
+-- the Track window slides out on the left side of the info window (on the right when the info window hugs the left screen edge)
+local function PlaceMenu()
+  if not menu or not panel then return end
+  local left = panel:GetLeft()
+  local sc = panel:GetScale()
+  if type(sc) ~= "number" or sc <= 0 then sc = 1 end
+  local rightSide = type(left) == "number" and (left * sc) < (MENU_W + 6)
+  menu:SetScale(sc)
+  menu:ClearAllPoints(); menu.body:ClearAllPoints()
+  if rightSide then
+    menu:SetPoint("TOPLEFT", panel, "TOPRIGHT", 2, 0)
+    menu.body:SetPoint("TOPLEFT", menu, "TOPLEFT", 0, 0)
+  else
+    menu:SetPoint("TOPRIGHT", panel, "TOPLEFT", -2, 0)
+    menu.body:SetPoint("TOPRIGHT", menu, "TOPRIGHT", 0, 0)
+  end
 end
 
 function Path.ToggleTrackMenu()
   BuildMenu(); RefreshMenu()
-  menu:SetShown(not menu:IsShown())
+  menuWanted = not menuWanted
+  PlaceMenu()
+  menu:Show()
+end
+
+local function SlideMenu(dt)
+  if not menu then return end
+  local goal = menuWanted and MENU_W or 0
+  if menuNow == goal then return end
+  local step = (dt or 0.02) * 900
+  if menuNow < goal then menuNow = math.min(goal, menuNow + step) else menuNow = math.max(goal, menuNow - step) end
+  menu:SetWidth(math.max(1, menuNow))
+  menu:SetAlpha(menuNow / MENU_W)
+  if menuNow == 0 then menu:Hide() end
+end
+
+-- ------------------------------------------------------------ next-steps list (slides down from the bottom of the info window)
+local list, listRows = nil, {}
+local LIST_ROW, LIST_HEAD, LIST_COMPACT, LIST_MAX = 16, 24, 5, 20
+local listWanted, listMore, listNow, listGoal = false, false, 0, 0
+
+local function ListFit()                -- how many rows fit between the info window and the bottom of the screen
+  local bottom = panel and panel:GetBottom()
+  if type(bottom) ~= "number" then return LIST_MAX end
+  local sc = panel:GetScale()
+  if type(sc) ~= "number" or sc <= 0 then sc = 1 end
+  local room = (bottom * sc - 24) / sc - LIST_HEAD - 8
+  return math.max(LIST_COMPACT, math.min(LIST_MAX, math.floor(room / LIST_ROW)))
+end
+
+local function BuildList()
+  if list then return end
+  list = CreateFrame("Frame", nil, panel)
+  list:SetFrameStrata("DIALOG")
+  list:SetSize(panel:GetWidth() or 440, 1)
+  list:SetPoint("TOPLEFT", panel, "BOTTOMLEFT", 0, -2)
+  if list.SetClipsChildren then list:SetClipsChildren(true) end
+  list.bg = list:CreateTexture(nil, "BACKGROUND"); list.bg:SetAllPoints()
+  list.bg:SetColorTexture(C.bg[1], C.bg[2], C.bg[3], .96)
+  list.edge = list:CreateTexture(nil, "BORDER")
+  list.edge:SetPoint("BOTTOMLEFT"); list.edge:SetPoint("BOTTOMRIGHT"); list.edge:SetHeight(2)
+  list.edge:SetColorTexture(C.red[1], C.red[2], C.red[3], 1)
+  list.head = list:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  list.head:SetPoint("TOPLEFT", 12, -7); list.head:SetText(UI.H.gold .. "NEXT STEPS  (click one to go there)|r"); Font(list.head, 11)
+  list.more = CreateFrame("Button", nil, list)
+  list.more:SetSize(54, 16); list.more:SetPoint("TOPRIGHT", -8, -4)
+  UI.Button(list.more)
+  list.more.t = list.more:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); list.more.t:SetPoint("CENTER"); Font(list.more.t, 11, "")
+  list.more:SetScript("OnClick", function() listMore = not listMore; Path.UpdatePanel() end)
+  for k = 1, LIST_MAX do
+    local b = CreateFrame("Button", nil, list)
+    b:SetHeight(LIST_ROW - 1)
+    b:SetPoint("TOPLEFT", 6, -LIST_HEAD - (k - 1) * LIST_ROW)
+    b:SetPoint("TOPRIGHT", -6, -LIST_HEAD - (k - 1) * LIST_ROW)
+    UI.Button(b)
+    b.t = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); b.t:SetPoint("LEFT", 6, 0); b.t:SetJustifyH("LEFT"); Font(b.t, 11, "")
+    b:SetScript("OnClick", function(self) if self.idx and Path.GotoStep then Path.GotoStep(self.idx) end end)
+    b:Hide()
+    listRows[k] = b
+  end
+  list:Hide()
+end
+
+local function RefreshList()
+  if not list then return end
+  local W = panel:GetWidth() or 440
+  list:SetWidth(W)
+  local cap = listMore and ListFit() or LIST_COMPACT
+  local up = (listWanted and Path.Upcoming) and Path.Upcoming(LIST_MAX) or {}
+  local shown = math.min(#up, cap)
+  for k = 1, LIST_MAX do
+    local b, e = listRows[k], up[k]
+    if e and k <= shown then
+      b.idx = e[2]
+      b.t:SetWidth(W - 30)
+      b.t:SetText(UI.H.muted .. k .. ".|r " .. UI.H.text .. Path.StepText(e[1]) .. "|r")
+      b:Show()
+    else b.idx = nil; b:Hide() end
+  end
+  if #up > LIST_COMPACT then
+    list.more.t:SetText(listMore and "Less" or "More"); list.more:Show()
+  else list.more:Hide() end
+  listGoal = listWanted and (LIST_HEAD + math.max(1, shown) * LIST_ROW + 6) or 0
+end
+
+function Path.ToggleStepList()
+  BuildList()
+  listWanted = not listWanted
+  if not listWanted then listMore = false end
+  list:Show()
+  RefreshList()
+end
+
+local function SlideList(dt)
+  if not list then return end
+  if listNow == listGoal then return end
+  local step = (dt or 0.02) * 900
+  if listNow < listGoal then listNow = math.min(listGoal, listNow + step) else listNow = math.max(listGoal, listNow - step) end
+  list:SetHeight(math.max(1, listNow))
+  if listNow == 0 then list:Hide() end
 end
 
 -- ------------------------------------------------------------ slide-out legend
@@ -223,12 +371,12 @@ local legendRows = {}                   -- each legend glyph with its filled chi
 local LEGEND = {
   { "A", "Accept a quest" }, { "T", "Hand in a quest" }, { "D", "Kill or collect" }, { "G", "Travel to next zone" },
   { "L", "Level up first" }, { "R", "Train spells (trainer)" }, { "corpse", "Your corpse" }, { "friend", "Party member" },
-  { "$", "Farming spot" },
+  { "$", "Farming spot" }, { "inn", "Inn (set your home)" },
 }
 BuildLegend = function()
   if legend then return end
   legendTab = CreateFrame("Button", nil, compass)
-  legendTab:SetSize(50, 16); legendTab:SetPoint("BOTTOMRIGHT", compass, "BOTTOMRIGHT", -4, 2)   -- re-anchored by PlaceLegendTab
+  legendTab:SetSize(50, 20); legendTab:SetPoint("BOTTOMRIGHT", compass, "BOTTOMRIGHT", -4, 2)   -- re-anchored by PlaceLegendTab
   UI.Button(legendTab)
   legendTab.t = legendTab:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   legendTab.t:SetPoint("CENTER"); legendTab.t:SetText("Legend"); Font(legendTab.t, 11)
@@ -330,6 +478,10 @@ local function Track()
       local s = r[1].s
       o = { kind = "farm", p = { s[1], s[2] }, m = map, title = s[7], sub = ("Farming spot, level %d-%d, about %d mobs"):format(s[4], s[5], s[3]) }
     end
+  elseif mode == "dungeon" then
+    o = Path.Dungeons and Path.Dungeons.Target()
+  elseif mode == "inn" then
+    o = Path.Inn and Path.Inn.Target()
   elseif mode == "friend" then
     local peers = ns.Tracker and ns.Tracker.Peers and ns.Tracker.Peers() or {}
     local p, name = peers[O.trackFriend or ""], O.trackFriend
@@ -371,19 +523,63 @@ local function Resolve()
   end
   if not kind and s then kind, pts, map, label = s.t, s.p, s.m, s.npc end
   if not kind or not pts or #pts < 2 then target.bearing, target.dist, target.why, target.kind, target.map = nil, nil, "none", kind, nil return end
-  local bestB, bestD, why
+  local bestB, bestD, why, bestX, bestY
   for i = 1, #pts, 2 do
     local b, d, w = Path.Vector(map, pts[i], pts[i + 1])
-    if b and (not bestD or d < bestD) then bestB, bestD = b, d end
+    if b and (not bestD or d < bestD) then bestB, bestD, bestX, bestY = b, d, pts[i], pts[i + 1] end
     why = w
   end
   target.bearing, target.dist, target.why, target.kind, target.label, target.map = bestB, bestD, (not bestB) and why or nil, kind, label, map
+  target.x, target.y = bestX, bestY      -- map position of the nearest point (the party tracker draws it)
+  target.mode = (override and override.mode) or (tr and tr.mode) or nil
   if override and override.kind ~= "friend" and bestD and bestD < 25 then override = nil; Path.UpdateHUD() end
 end
 
 function Path.SetOverride(o) override = o; Path.UpdateHUD() end
 function Path.GetOverride() return override end
 function Path.Target() return target end
+-- how the party tracker should draw the current target: colour, text glyph, and travel picture (or nil)
+function Path.TargetLook()
+  local k = target.kind
+  if not k then return nil end
+  return COLORS[k] or C.gold, ICON[k] or "!", ModeIcon()
+end
+
+-- the same look for a target that belongs to someone else (a party member's shared goal)
+function Path.KindLook(kind, pic)
+  if not kind then return nil end
+  return COLORS[kind] or C.gold, ICON[kind] or "!", (kind == "travel" and MODETEX[pic or ""]) or nil
+end
+
+-- plain words for what a goal is, e.g. "handing in a quest to Bob" or "travelling by tram: Deeprun Tram"
+local MODEWORD = { tram = "by tram", boat = "by boat", zep = "by zeppelin", fly = "by flight path", flyself = "flying", walk = "on foot" }
+function Path.GoalText(kind, pic, label)
+  local l = (label and label ~= "") and label or nil
+  if kind == "A" then return l and ("picking up a quest from " .. l) or "picking up a quest" end
+  if kind == "T" then return l and ("handing in a quest to " .. l) or "handing in a quest" end
+  if kind == "D" then return l and ("questing: " .. l) or "questing" end
+  if kind == "G" or kind == "travel" then
+    local how = MODEWORD[pic or ""]
+    return "travelling" .. (how and (" " .. how) or "") .. (l and (": " .. l) or "")
+  end
+  if kind == "L" then return "levelling up first" end
+  if kind == "R" or kind == "trainer" then return l and ("training at " .. l) or "visiting a trainer" end
+  if kind == "corpse" then return "running back to their corpse" end
+  if kind == "friend" then return l and ("going to " .. l) or "going to a party member" end
+  if kind == "farm" then return l and ("farming " .. l) or "farming" end
+  if kind == "dungeon" then return l and ("heading to " .. l) or "heading to a dungeon" end
+  if kind == "inn" then return l and ("going to the inn: " .. l) or "going to an inn" end
+  return nil
+end
+
+-- what to tell the party about my current goal: kind, map, x, y, travel picture, label (map 0 = no position, e.g. another continent)
+function Path.ShareTarget()
+  local t = target
+  if not t.kind then return nil end
+  local pic = (t.kind == "travel") and ModeIcon() or nil
+  if t.map and t.x and t.y then return t.kind, t.map, t.x, t.y, pic, t.label end
+  return t.kind, 0, 0, 0, pic, t.label
+end
 
 -- /path trainer: point at the nearest trainer for your class right now
 function Path.PointTrainer()
@@ -437,12 +633,20 @@ local function Draw()
   if target.bearing then
     local rel = Wrap(target.bearing - heading)
     local c = COLORS[target.kind] or C.gold
-    marker.icon:SetText(ICON[target.kind] or "!")
-    if Path.Opts().boldMarkers ~= false then
+    local mt = ModeIcon()
+    marker.icon:SetText(mt and "" or (ICON[target.kind] or "!"))
+    local bold = Path.Opts().boldMarkers ~= false
+    if bold then
       marker.chip:SetColorTexture(c[1], c[2], c[3], .95); marker.chip:Show()
       marker.icon:SetTextColor(C.bg[1], C.bg[2], C.bg[3])
     else
       marker.chip:Hide(); marker.icon:SetTextColor(c[1], c[2], c[3])
+    end
+    if mt then
+      local tc = bold and C.bg or c
+      marker.tex:SetTexture(TEXDIR .. mt); marker.tex:SetVertexColor(tc[1], tc[2], tc[3], 1); marker.tex:Show()
+    else
+      marker.tex:Hide()
     end
     marker.arrowL:SetTextColor(c[1], c[2], c[3]); marker.arrowR:SetTextColor(c[1], c[2], c[3])
     local x
@@ -511,7 +715,7 @@ local function UpdatePanel()
     local c = COLORS[s.t] or C.gold
     local verb, name, subt = Path.Describe(s)
     if s.t == "D" then
-      local have, need = Path.ObjectiveProgress(s.q, s.npc)
+      local have, need = Path.ObjectiveProgress(s.q, s.npc, s.kind, s.cnt)
       if not have and s.cnt and s.kind ~= "explore" then have, need = 0, s.cnt end
       if have then panel.big:SetText((have >= need and UI.H.good or UI.H.cream) .. have .. "/" .. need .. "|r") end
     end
@@ -556,9 +760,11 @@ local function UpdatePanel()
   local n = 0
   for k = 1, 3 do if panel.next[k]:IsShown() then n = n + 1 end end
   h = h + n * 13 + (n > 0 and 8 or 0) + (O.compact and 10 or 22)
-  -- keep room for the Legend button in the bottom right corner and the distance line above it
-  local minH = ((panel.dist:GetText() or "") ~= "" and 104) or (O.compact and 84 or 70)
+  h = h + 24                                  -- the button row along the bottom
+  -- keep room for the bottom button row and the distance line above it
+  local minH = ((panel.dist:GetText() or "") ~= "" and 112) or (O.compact and 92 or 78)
   panel:SetHeight(math.max(minH, h))
+  RefreshList()
 end
 Path.UpdatePanel = UpdatePanel
 
@@ -616,7 +822,7 @@ function Path.UpdateHUD()
   if O.pos then compass:ClearAllPoints(); compass:SetPoint(O.pos[1], UIParent, O.pos[2], O.pos[3], O.pos[4]) end
   compass:SetShown(O.hud)
   panel:SetShown(O.hud and O.panel)
-  PlacePanel(); PlaceLegendTab(); ApplyMarkerStyle()
+  PlacePanel(); PlaceLegendTab(); ApplyMarkerStyle(); PlaceMenu()
   Resolve()
   UpdatePanel()
 end
@@ -627,6 +833,7 @@ function Path.OnReady()
   compass:SetScript("OnUpdate", function(_, dt)
     acc = acc + dt; acc2 = acc2 + dt; lastDt = dt
     SlideLegend(dt)
+    SlideMenu(dt); SlideList(dt)
     if acc >= 0.08 then acc = 0; Resolve() end
     Draw()
     if acc2 >= 0.6 then acc2 = 0; UpdatePanel() end

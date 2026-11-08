@@ -1,0 +1,1316 @@
+-- Realm Bags: one combined bag window with sorting, search, and a tab for every character you have played.
+-- Each character's bags (and bank, after you open the bank once) are saved to RealmDB when the bags change and
+-- when you log out, so any alt can be browsed from any other character. The window is optional: it replaces the
+-- default bag keys only when "One bag" is turned on (/realm bags on, or the setup window).
+local ADDON, ns = ...
+local Bags = {}
+ns.Bags = Bags
+
+local COLS, CELL, GAP = 10, 38, 4           -- GAP is the little space between slots
+local HDR, SGAP = 20, 8                     -- category header height, space after a category
+local DB
+local frame, buttons = nil, {}
+local viewKey, viewBank, sortMode, filterText = nil, false, "bag", ""
+local bankOpen = false
+local UpdatePouch                       -- minimized-bag icon (defined below)
+local DRAWER_W = 112
+local drawer = { open = false, w = 0, t = 0 }   -- alt-character drawer on the bag's left edge
+
+local CC = C_Container
+local NumSlots = (CC and CC.GetContainerNumSlots) or GetContainerNumSlots
+local function Money(c) return GetCoinTextureString and GetCoinTextureString(c or 0) or tostring(c or 0) end
+local function Print(m) if ns.Print then ns.Print(m) end end
+
+-- ------------------------------------------------------------ pure helpers (unit tested)
+local SORTS = { category = "categories", bag = "bag order", type = "type", quality = "quality", name = "name", value = "value" }
+local SORT_ORDER = { "category", "bag", "type", "quality", "name", "value" }
+Bags.SORTS = SORTS
+
+local function ItemName(link)
+  return (link and link:match("%[(.-)%]")) or "?"
+end
+
+-- raw slot data -> one stored item
+function Bags.MakeItem(bag, slot, link, count, quality, icon, classID, price, id, ilvl)
+  if not link then return nil end
+  return {
+    bag = bag, slot = slot, link = link, count = count or 1, q = quality or 1, icon = icon,
+    cls = classID or 99, price = price or 0, name = ItemName(link),
+    id = id or tonumber(link:match("item:(%d+)")), ilvl = ilvl,
+  }
+end
+
+local function Cmp(mode)
+  if mode == "type" then
+    return function(a, b)
+      if a.cls ~= b.cls then return a.cls < b.cls end
+      if a.q ~= b.q then return a.q > b.q end
+      return a.name < b.name
+    end
+  elseif mode == "quality" then
+    return function(a, b)
+      if a.q ~= b.q then return a.q > b.q end
+      return a.name < b.name
+    end
+  elseif mode == "name" then
+    return function(a, b)
+      if a.name ~= b.name then return a.name < b.name end
+      return a.count > b.count
+    end
+  elseif mode == "value" then
+    return function(a, b)
+      local va, vb = a.price * a.count, b.price * b.count
+      if va ~= vb then return va > vb end
+      return a.name < b.name
+    end
+  end
+  return function(a, b)
+    if a.bag ~= b.bag then return a.bag < b.bag end
+    return a.slot < b.slot
+  end
+end
+
+-- returns a new list, filtered by text and ordered by mode
+function Bags.Arrange(items, mode, text)
+  local out = {}
+  text = (text or ""):lower()
+  for _, it in ipairs(items or {}) do
+    if text == "" or it.name:lower():find(text, 1, true) then out[#out + 1] = it end
+  end
+  table.sort(out, Cmp(mode or "bag"))
+  return out
+end
+
+-- the item to drop when a loot will not fit: the lowest total vendor value. Only poor (grey) and common (white) items
+-- are ever picked. Never picked: uncommon or better, quest items, items with no vendor price (0 means "cannot be sold",
+-- not "cheap"), profession items (profession bag items, trade goods, reagents, gems, recipes, enhancements), and
+-- consumables (food, potions) since those sell on the auction house. A common item must be plain armor or a weapon.
+function Bags.CheapestDroppable(items)
+  local best, bestVal
+  for _, it in ipairs(items or {}) do
+    local price = it.price or 0
+    local q, c = it.q or 1, it.cls
+    local profession = (it.fam and it.fam ~= 0) or c == 3 or c == 5 or c == 7 or c == 8 or c == 9
+    local ok = q == 0 or (q == 1 and (c == 2 or c == 4))
+    if price > 0 and c ~= 12 and ok and not profession then
+      local val = price * (it.count or 1)
+      if not best or val < bestVal or (val == bestVal and (it.q or 1) < (best.q or 1)) then best, bestVal = it, val end
+    end
+  end
+  return best, bestVal
+end
+
+-- ------------------------------------------------------------ categories
+local CAT_GEAR, CAT_USE, CAT_CRAFT, CAT_QUEST, CAT_BAGS, CAT_JUNK, CAT_GENERAL =
+  "Armor & Weapons", "Consumables", "Crafting & Professions", "Quest", "Bags", "Junk", "General"
+local CAT_ORDER = { CAT_GEAR, CAT_USE, CAT_CRAFT, CAT_QUEST, CAT_BAGS, CAT_JUNK, CAT_GENERAL }
+Bags.CATEGORIES = CAT_ORDER
+
+-- which section an item belongs to. Anything that does not fit stays in General.
+function Bags.Category(it)
+  if not it then return CAT_GENERAL end
+  if it.q == 0 then return CAT_JUNK end
+  if it.fam and it.fam ~= 0 then return CAT_CRAFT end      -- sits in a profession bag (herb, mining, enchanting...)
+  local c = it.cls
+  if c == 2 or c == 4 then return CAT_GEAR end
+  if c == 0 then return CAT_USE end
+  if c == 3 or c == 5 or c == 7 or c == 9 then return CAT_CRAFT end   -- gems, reagents, trade goods, recipes
+  if c == 12 then return CAT_QUEST end
+  if c == 1 then return CAT_BAGS end
+  return CAT_GENERAL
+end
+
+-- items filtered by text and grouped by category. `empties` (a list) are free slots; they all start in General
+-- and leave it as items arrive. Empty sections are left out.
+function Bags.Sections(items, text, empties)
+  local sorted = Bags.Arrange(items, "type", text)
+  local by = {}
+  for _, it in ipairs(sorted) do
+    local k = Bags.Category(it)
+    by[k] = by[k] or {}
+    by[k][#by[k] + 1] = it
+  end
+  local out = {}
+  for _, name in ipairs(CAT_ORDER) do
+    local list = by[name] or {}
+    local free = (name == CAT_GENERAL) and empties or nil
+    if #list > 0 or (free and #free > 0) then out[#out + 1] = { name = name, items = list, empties = free } end
+  end
+  return out
+end
+
+-- pixel positions for each section: returns cells, headers, total height
+function Bags.Layout(sections, cols, cell, hdr, gap, rowh)
+  rowh = rowh or cell                       -- row pitch: squeezing shrinks this, never the column pitch
+  local cells, heads, y = {}, {}, 0
+  for _, sec in ipairs(sections) do
+    if sec.name then
+      heads[#heads + 1] = { name = sec.name, n = #sec.items, y = y }
+      y = y + hdr
+    end
+    local idx = 0
+    for _, it in ipairs(sec.items) do
+      cells[#cells + 1] = { item = it, x = (idx % cols) * cell, y = y + math.floor(idx / cols) * rowh }
+      idx = idx + 1
+    end
+    for _, e in ipairs(sec.empties or {}) do
+      cells[#cells + 1] = { empty = true, bag = e.bag, slot = e.slot, x = (idx % cols) * cell, y = y + math.floor(idx / cols) * rowh }
+      idx = idx + 1
+    end
+    y = y + math.ceil(idx / cols) * rowh + (sec.name and gap or 0)
+  end
+  return cells, heads, y
+end
+
+-- money as 12g 34s 56c with coloured letters
+function Bags.MoneyText(c)
+  c = math.max(0, math.floor(tonumber(c) or 0))
+  local g, s, cp = math.floor(c / 10000), math.floor(c % 10000 / 100), c % 100
+  local out = {}
+  if g > 0 then out[#out + 1] = ("%d|cffffd700g|r"):format(g) end
+  if g > 0 or s > 0 then out[#out + 1] = ("%d|cffc0c0c0s|r"):format(s) end
+  out[#out + 1] = ("%d|cffeda55fc|r"):format(cp)
+  return table.concat(out, " ")
+end
+
+-- every character's items merged by item id, with a per-character breakdown
+function Bags.Combine(all)
+  local byId, order = {}, {}
+  for charKey, rec in pairs(all or {}) do
+    for _, list in ipairs({ rec.items or {}, rec.bank or {} }) do
+      for _, it in ipairs(list) do
+        local key = it.id or it.name
+        local e = byId[key]
+        if not e then
+          e = { id = it.id, link = it.link, name = it.name, icon = it.icon, q = it.q, cls = it.cls, price = it.price, fam = it.fam,
+                count = 0, who = {}, bag = 0, slot = 0 }
+          byId[key] = e; order[#order + 1] = e
+        end
+        e.count = e.count + it.count
+        e.who[charKey] = (e.who[charKey] or 0) + it.count
+      end
+    end
+  end
+  return order
+end
+
+-- ------------------------------------------------------------ reading the live bags
+local function SlotInfo(bag, slot)
+  if CC and CC.GetContainerItemInfo then
+    local i = CC.GetContainerItemInfo(bag, slot)
+    if i and i.hyperlink then return i.hyperlink, i.stackCount or 1, i.quality, i.iconFileID, i.itemID end
+  elseif GetContainerItemInfo then
+    local icon, count, _, quality, _, _, link = GetContainerItemInfo(bag, slot)
+    if link then return link, count or 1, quality, icon end
+  end
+end
+
+local function InfoFor(link)
+  local classID, price, ilvl
+  local inst = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+  if inst then
+    local ok, _, _, _, _, _, c = pcall(inst, link)
+    if ok then classID = c end
+  end
+  local fn = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+  if fn then
+    local ok, a, b, c, d, e, f, g, h, i, j, p = pcall(fn, link)
+    if ok then price = p; ilvl = d end
+  end
+  local det = C_Item and C_Item.GetDetailedItemLevelInfo
+  if det then
+    local ok, v = pcall(det, link)
+    if ok and tonumber(v) and v > 0 then ilvl = v end
+  end
+  return classID, price, ilvl
+end
+
+-- the (up to three) currencies shown in the backpack, as { name, qty, icon }
+local function BackpackCurrencies()
+  local out = {}
+  for i = 1, 3 do
+    local name, qty, icon
+    local api = C_CurrencyInfo and C_CurrencyInfo.GetBackpackCurrencyInfo
+    if api then
+      local ok, t = pcall(api, i)
+      if ok and type(t) == "table" then name, qty, icon = t.name, t.quantity, t.iconFileID end
+    elseif GetBackpackCurrencyInfo then
+      local ok, a, b, c = pcall(GetBackpackCurrencyInfo, i)
+      if ok then name, qty, icon = a, b, c end
+    end
+    if name then out[#out + 1] = { name = name, qty = qty or 0, icon = icon } end
+  end
+  return out
+end
+
+local function ReagentBag()
+  return Enum and Enum.BagIndex and Enum.BagIndex.ReagentBag
+end
+
+local function InventoryBags()
+  local list, last = {}, NUM_BAG_SLOTS or 4
+  for b = 0, last do list[#list + 1] = b end
+  local r = ReagentBag()
+  if r then list[#list + 1] = r end
+  return list
+end
+
+local function BankBags()
+  local list = { -1 }
+  local first = (NUM_BAG_SLOTS or 4) + 1 + (ReagentBag() and 1 or 0)
+  for b = first, first + (NUM_BANKBAGSLOTS or 7) - 1 do list[#list + 1] = b end
+  return list
+end
+
+local function BagFamily(bag)
+  if ReagentBag() and bag == ReagentBag() then return 1 end
+  local fn = (CC and CC.GetContainerNumFreeSlots) or GetContainerNumFreeSlots
+  if fn then
+    local ok, _, fam = pcall(fn, bag)
+    if ok and tonumber(fam) then return fam end
+  end
+  return 0
+end
+
+-- the free slots of your live inventory bags, as { bag, slot }
+local function LiveEmpties()
+  local out = {}
+  for _, bag in ipairs(InventoryBags()) do
+    for slot = 1, (NumSlots and NumSlots(bag)) or 0 do
+      if not SlotInfo(bag, slot) then out[#out + 1] = { bag = bag, slot = slot } end
+    end
+  end
+  return out
+end
+
+local function ScanBags(list)
+  local items, total, used = {}, 0, 0
+  for _, bag in ipairs(list) do
+    local n = (NumSlots and NumSlots(bag)) or 0
+    total = total + n
+    local fam = BagFamily(bag)
+    for slot = 1, n do
+      local link, count, quality, icon, id = SlotInfo(bag, slot)
+      if link then
+        used = used + 1
+        local cls, price, ilvl = InfoFor(link)
+        local item = Bags.MakeItem(bag, slot, link, count, quality, icon, cls, price, id, ilvl)
+        item.fam = fam
+        items[#items + 1] = item
+      end
+    end
+  end
+  return items, total, used
+end
+
+local function CharKey()
+  return ((UnitName and UnitName("player")) or "?") .. "-" .. ((GetRealmName and GetRealmName()) or "")
+end
+Bags.CharKey = CharKey
+
+-- save this character's bags (and bank when it is open) into RealmDB
+function Bags.Snapshot()
+  if not DB then return end
+  local key = CharKey()
+  local rec = DB.bags[key] or {}
+  DB.bags[key] = rec
+  rec.name = (UnitName and UnitName("player")) or "?"
+  rec.realm = (GetRealmName and GetRealmName()) or ""
+  rec.class = select(2, UnitClass("player"))
+  rec.level = UnitLevel and UnitLevel("player")
+  rec.money = GetMoney and GetMoney() or 0
+  rec.time = time()
+  rec.cur = BackpackCurrencies()
+  rec.items, rec.total, rec.used = ScanBags(InventoryBags())
+  if bankOpen then
+    rec.bank, rec.bankTotal, rec.bankUsed = ScanBags(BankBags())
+    rec.bankTime = time()
+  end
+  if UpdatePouch then UpdatePouch() end
+  return rec
+end
+
+-- ------------------------------------------------------------ window
+local Refresh, BuildOptions
+
+-- free slots text: red when nearly full
+function Bags.FreeText(used, total)
+  total, used = total or 0, used or 0
+  local free = math.max(0, total - used)
+  local col = free == 0 and "ff4040" or (free <= 3 and "ffaa33" or "66ff66")
+  return ("|cff%s%d free|r / %d"):format(col, free, total), free
+end
+
+-- ------------------------------------------------------------ options (the gear menu)
+local OPT_DEFAULT = { free = true, money = true, currency = true, ilvl = true, quality = true, delay = 6, fontSize = 11 }
+local DELAYS = { 0, 3, 6, 10 }          -- seconds before the alt drawer slides back in; 0 = stays open
+Bags.DELAYS = DELAYS
+function Bags.Opt(k)
+  local v = DB and DB.bagOpt and DB.bagOpt[k]
+  if v == nil then return OPT_DEFAULT[k] end
+  return v
+end
+function Bags.SetOpt(k, v)
+  if not DB then return end
+  DB.bagOpt = DB.bagOpt or {}
+  DB.bagOpt[k] = v
+  if Refresh then Refresh() end
+end
+function Bags.NextDelay()
+  local cur = Bags.Opt("delay")
+  local nxt = DELAYS[1]
+  for i, d in ipairs(DELAYS) do if d == cur then nxt = DELAYS[i % #DELAYS + 1]; break end end
+  Bags.SetOpt("delay", nxt)
+  return nxt
+end
+
+-- text size of the gold and currency lines (gear menu, or /realm bags fontsize N)
+local FONT_MIN, FONT_MAX, FONT_BASE = 9, 20, 11
+local FONT_FILE = "Fonts\\FRIZQT__.TTF"
+function Bags.ClampFont(n)
+  n = tonumber(n) or FONT_BASE
+  return math.max(FONT_MIN, math.min(FONT_MAX, math.floor(n + 0.5)))
+end
+function Bags.FontSize() return Bags.ClampFont(Bags.Opt("fontSize")) end
+function Bags.StepFont(delta) Bags.SetOpt("fontSize", Bags.ClampFont(Bags.FontSize() + delta)) end
+
+-- header rows scale with the text size: the <-Alts button sits on the name row (right side), then the gold line and the
+-- currency line; returns y offsets and header height
+function Bags.HeaderLayout(size)
+  size = Bags.ClampFont(size)
+  local lh = size + 3
+  local handle = 26
+  local money = 46
+  local cur = money + lh
+  return { money = money, cur = cur, handle = handle, head = cur + lh + 6, line = lh }
+end
+function Bags.HeadHeight() return Bags.HeaderLayout(Bags.FontSize()).head end
+
+-- currencies as one line: icon and amount for each (icon follows the text size)
+function Bags.CurrencyText(list, size)
+  local parts = {}
+  local px = Bags.ClampFont(size or Bags.FontSize()) + 3
+  for _, c in ipairs(list or {}) do
+    local icon = c.icon and ("|T%s:%d|t "):format(tostring(c.icon), px) or ((c.name or "?") .. " ")
+    parts[#parts + 1] = icon .. tostring(c.qty or 0)
+  end
+  return table.concat(parts, "   ")
+end
+
+-- one animation step of the alt drawer. s = { open, w, t }; w is its width, t the idle seconds.
+-- It closes itself after `delay` seconds without the mouse over it (delay 0 = never).
+function Bags.DrawerStep(s, dt, over, delay, width)
+  if s.open then
+    if over or not delay or delay <= 0 then s.t = 0
+    else
+      s.t = s.t + dt
+      if s.t >= delay then s.open = false end
+    end
+  end
+  local speed = width / 0.15
+  if s.open then s.w = math.min(width, s.w + speed * dt) else s.w = math.max(0, s.w - speed * dt) end
+  return s
+end
+
+-- the minimized bag: a small cloth pouch with the free-slot count under it
+local pouch
+function UpdatePouch()
+  if not DB then return end
+  if not DB.bagMin then if pouch then pouch:Hide() end return end
+  if not pouch then
+    pouch = CreateFrame("Button", "RealmBagPouch", UIParent)
+    pouch:SetSize(48, 60)
+    pouch:SetFrameStrata("HIGH")
+    pouch:SetMovable(true); pouch:EnableMouse(true); pouch:SetClampedToScreen(true)
+    pouch:RegisterForDrag("LeftButton")
+    pouch:SetScript("OnDragStart", function(self) if not (DB and DB.bagLocked) then self:StartMoving() end end)
+    pouch:SetScript("OnDragStop", function(self)
+      self:StopMovingOrSizing()
+      local p, _, rp, x, y = self:GetPoint()
+      DB.bagPouchPos = { p, rp, x, y }
+    end)
+    pouch.tex = pouch:CreateTexture(nil, "ARTWORK")
+    pouch.tex:SetSize(44, 44); pouch.tex:SetPoint("TOP", 0, 0)
+    pouch.tex:SetTexture("Interface\\AddOns\\Realm\\Path\\icons\\bag")
+    pouch.tex:SetVertexColor(.78, .55, .31)
+    pouch.txt = pouch:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    pouch.txt:SetPoint("TOP", pouch.tex, "BOTTOM", 0, 0)
+    pouch:SetScript("OnClick", function() Bags.Show() end)
+    pouch:SetScript("OnEnter", function(self)
+      if not GameTooltip then return end
+      GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+      GameTooltip:AddLine("Realm Bags")
+      GameTooltip:AddLine("Click to open. Drag to move.", .8, .8, .8)
+      GameTooltip:Show()
+    end)
+    pouch:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+    local pos = DB.bagPouchPos
+    if pos then pouch:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4]) else pouch:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -80, 120) end
+  end
+  local rec = DB.bags[CharKey()]
+  local text = rec and Bags.FreeText(rec.used, rec.total) or ""
+  pouch.txt:SetText(text)
+  pouch:Show()
+end
+
+-- frame lock + scale: the padlock freezes moving and resizing; the corner grip scales the whole bag
+local SCALE_MIN, SCALE_MAX = 0.6, 2.0
+function Bags.ClampScale(s)
+  s = tonumber(s) or 1
+  return math.max(SCALE_MIN, math.min(SCALE_MAX, s))
+end
+function Bags.ScaleForWidth(width, baseWidth)          -- width the cursor asks for, in screen units
+  if not baseWidth or baseWidth <= 0 then return 1 end
+  return Bags.ClampScale(width / baseWidth)
+end
+function Bags.IsLocked() return DB and DB.bagLocked and true or false end
+function Bags.SetLocked(v)
+  if not DB then return end
+  DB.bagLocked = v and true or false
+  if frame and frame.lockTex then
+    frame.lockTex:SetTexture(DB.bagLocked and "Interface\\Buttons\\LockButton-Locked-Up" or "Interface\\Buttons\\LockButton-Unlocked-Up")
+    if frame.grip then if DB.bagLocked then frame.grip:Hide() else frame.grip:Show() end end
+    if frame.squeeze then if DB.bagLocked then frame.squeeze:Hide() else frame.squeeze:Show() end end
+  end
+end
+function Bags.SetScaleValue(s)
+  if not DB then return end
+  DB.bagScale = Bags.ClampScale(s)
+  if frame then frame:SetScale(DB.bagScale) end
+end
+local function SaveFramePos(f)
+  local p, _, rp, x, y = f:GetPoint()
+  if p then DB.bagPos = { p, rp, x, y } end
+end
+
+function Bags.Minimize()
+  if not DB then return end
+  DB.bagMin = true
+  drawer.open, drawer.w, drawer.t = false, 0, 0      -- the character drawer slides in with it
+  if frame then
+    frame.drawer:SetWidth(1); frame.drawer:Hide()
+    frame:Hide()
+  end
+  UpdatePouch()
+end
+
+local function CharList()
+  local list = {}
+  for key, rec in pairs(DB.bags) do list[#list + 1] = { key = key, rec = rec } end
+  table.sort(list, function(a, b)
+    if a.key == CharKey() then return true end
+    if b.key == CharKey() then return false end
+    return a.key < b.key
+  end)
+  return list
+end
+
+local function Source()
+  if viewKey == "ALL" then return Bags.Combine(DB.bags), nil end
+  local rec = DB.bags[viewKey or CharKey()]
+  if not rec then return {}, nil end
+  if viewBank then return rec.bank or {}, rec end
+  return rec.items or {}, rec
+end
+
+-- drag and drop: pick an item up by dragging it, drop it by releasing on any slot (swaps if the slot is taken)
+local function Pick(bag, slot)
+  local pick = (CC and CC.PickupContainerItem) or PickupContainerItem
+  if pick and bag and slot then pick(bag, slot) end
+end
+local function CanAct(self) return self.live and not (InCombatLockdown and InCombatLockdown()) end
+local function Target(self)
+  if self.item then return self.item.bag, self.item.slot end
+  return self.eBag, self.eSlot
+end
+
+-- ------------------------------------------------------------ drop toggle (footer button)
+-- On: when a loot will not fit because the bags are full, the cheapest safe item is dropped (destroyed) and the loot is tried again.
+local DROP_HELP = "If enabled will drop cheapest item in bag if when looting you are full and will attempt another loot."
+local MAX_DROPS = 3                          -- per loot window: a runaway guard
+local lootOpen, dropBusy, drops = false, false, 0
+local lootStamp = 0                          -- GetTime() of the last loot event: auto-loot can fire the full-bag error around the window
+Bags.DROP_HELP = DROP_HELP
+
+local function Now() return (GetTime and GetTime()) or 0 end
+-- /realm bags drop debug on|off: says why a drop did or did not happen
+local function Dbg(m) if DB and DB.bagDropDebug then Print("|cff999999drop debug:|r " .. m) end end
+local function LootActive() return lootOpen or (Now() - lootStamp) < 2.5 end
+local function HasCursor()
+  if CursorHasItem then return CursorHasItem() and true or false end
+  if C_Cursor and C_Cursor.GetCursorItem then return C_Cursor.GetCursorItem() ~= nil end
+  return false
+end
+-- the "bags are full" text: the game constant when present, plus plain-text matches in case the client words it differently
+local function IsFullMsg(msg)
+  if type(msg) ~= "string" then return false end
+  if msg == _G.ERR_INV_FULL or msg == _G.ERR_BAG_FULL then return true end
+  local m = msg:lower()
+  return m:find("inventory is full", 1, true) or m:find("bags are full", 1, true) or m:find("bag is full", 1, true) or false
+end
+Bags.IsFullMsg = IsFullMsg
+
+-- on by default: only an explicit false (button or /realm bags drop off) turns it off
+function Bags.DropOn() return DB ~= nil and DB.bagDrop ~= false end
+
+local function PaintDrop()
+  local b = frame and rawget(frame, "dropBtn")
+  if b then b:SetText(Bags.DropOn() and "|cff66ff66Drop|r" or "|cffaaaaaaDrop|r") end
+end
+
+function Bags.SetDrop(v)
+  if not DB then return end
+  DB.bagDrop = v and true or false
+  PaintDrop()
+  Print("drop: " .. (DB.bagDrop and "ON. A full bag will lose its cheapest item so a loot can land." or "off."))
+end
+
+local function RetryLoot()
+  dropBusy = false
+  local n = (GetNumLootItems and GetNumLootItems()) or 0
+  if not lootOpen or n == 0 then
+    Print("drop: room made. The loot window had already closed, so loot the body again.")
+    return
+  end
+  Dbg("retrying " .. n .. " loot slot(s)")
+  for slot = n, 1, -1 do
+    if LootSlot then pcall(LootSlot, slot) end
+  end
+end
+
+-- called when the game says the bags are full around a loot. `why` is only used by the debug prints.
+function Bags.TryDrop(why)
+  local function No(reason) Dbg("not dropping: " .. reason .. (why and (" [" .. why .. "]") or "")); return false end
+  if not Bags.DropOn() then return No("Drop is off") end
+  if not LootActive() then return No("no loot window is open or was open in the last 2.5 seconds") end
+  if dropBusy then return No("a drop is already in progress") end
+  if drops >= MAX_DROPS then return No("already dropped " .. MAX_DROPS .. " items for this loot") end
+  if InCombatLockdown and InCombatLockdown() then return No("in combat") end
+  if HasCursor() then return No("the cursor is holding something") end          -- the player is holding something: leave it alone
+  local it = Bags.CheapestDroppable((ScanBags(InventoryBags())))
+  if not it then
+    Print("drop: nothing safe to drop (only grey items and white armor or weapons are ever dropped).")
+    return false
+  end
+  Dbg("picking up " .. it.link .. " from bag " .. it.bag .. " slot " .. it.slot .. (why and (" [" .. why .. "]") or ""))
+  Pick(it.bag, it.slot)
+  if not HasCursor() then return No("the pickup did not take (slot locked or pickup blocked)") end
+  if not DeleteCursorItem then
+    if ClearCursor then ClearCursor() end
+    return No("DeleteCursorItem is not available in this client")
+  end
+  local ok, err = pcall(DeleteCursorItem)
+  if not ok then
+    if ClearCursor then ClearCursor() end
+    Print("drop: the game refused to delete the item (" .. tostring(err) .. "). Nothing was lost.")
+    return false
+  end
+  if HasCursor() then      -- the delete did not take: put the item back rather than leave it on the cursor
+    if ClearCursor then ClearCursor() end
+    Print("drop: the delete did not go through, the item was put back.")
+    return false
+  end
+  drops, dropBusy = drops + 1, true
+  Print("dropped " .. it.link .. (it.count > 1 and (" x" .. it.count) or "") .. " to make room, looting again.")
+  C_Timer.After(0.4, RetryLoot)
+  return true
+end
+
+-- Right-click use is a protected action: an addon's own click handler is not allowed to call UseContainerItem
+-- (the game blocks the addon). So each cell is a secure button carrying the "use this item" action itself.
+-- Secure attributes cannot change in combat, so Refresh waits until combat ends.
+local function InCombat() return InCombatLockdown and InCombatLockdown() end
+local function Arm(b, it, live)
+  if InCombat() then return end
+  if live and it and it.bag and it.slot then
+    b:SetAttribute("type2", "item")
+    b:SetAttribute("item2", it.bag .. " " .. it.slot)
+  else
+    b:SetAttribute("type2", nil)
+    b:SetAttribute("item2", nil)
+  end
+end
+
+local function Cell(i)
+  local b = buttons[i]
+  if b then return b end
+  b = CreateFrame("Button", nil, frame.content, "SecureActionButtonTemplate")
+  b:SetAttribute("shift-type2", "")        -- shift+right-click stays a plain click (no item use)
+  b:SetSize(CELL - GAP, CELL - GAP)
+  b.icon = b:CreateTexture(nil, "ARTWORK"); b.icon:SetAllPoints()
+  b.border = b:CreateTexture(nil, "OVERLAY"); b.border:SetAllPoints(); b.border:SetColorTexture(1, 1, 1, 0)
+  b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
+  b.count:SetPoint("BOTTOMRIGHT", -1, 1)
+  b.lvl = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+  b.lvl:SetPoint("TOPLEFT", 1, -2)
+  b.hl = b:CreateTexture(nil, "HIGHLIGHT"); b.hl:SetAllPoints(); b.hl:SetColorTexture(1, 1, 1, .25)
+  b:RegisterForClicks("AnyUp", "AnyDown")
+  b:RegisterForDrag("LeftButton")
+  b:SetScript("OnDragStart", function(self)
+    if self.item and CanAct(self) then Pick(self.item.bag, self.item.slot) end
+  end)
+  b:SetScript("OnReceiveDrag", function(self)
+    if CanAct(self) then Pick(Target(self)) end
+  end)
+  b:SetScript("OnEnter", function(self)
+    if not (GameTooltip and self.item) then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    pcall(GameTooltip.SetHyperlink, GameTooltip, self.item.link)
+    if self.item.who then
+      for k, n in pairs(self.item.who) do GameTooltip:AddLine(k .. ": " .. n, .8, .8, .8) end
+    end
+    GameTooltip:Show()
+  end)
+  b:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  -- HookScript, not SetScript: SetScript would replace the secure template's own click handler and the item action would never run
+  b:HookScript("OnClick", function(self, button, down)
+    if down then return end
+    local it = self.item
+    if it and IsShiftKeyDown and IsShiftKeyDown() and ChatEdit_InsertLink then ChatEdit_InsertLink(it.link) return end
+    -- only your own live bags can be handled; saved views are look-only
+    if not CanAct(self) then return end
+    if button ~= "RightButton" and CursorHasItem and CursorHasItem() then
+      Pick(Target(self))                 -- an item is on the cursor: a click still drops it here
+    end                                  -- right-click use is the secure item action; picking up is done by dragging
+  end)
+  buttons[i] = b
+  return b
+end
+
+-- window height for a number of item rows: header above the grid + footer buttons below it
+local HEAD, FOOT, MINROWS, MAXROWS = 96, 58, 3, 13   -- FOOT: buttons row plus a 20 pixel strip of its own for the "-" grabber
+-- the "-" grabber at the bottom squeezes the free space between the labels and the items (0 = normal, 1 = tightest);
+-- the bag never rolls up and scrolls because of it
+local SQ_HDR, SQ_GAP, SQ_ROW = 4, 6, GAP          -- most each gap can shrink: category header, space after a category, space between rows
+function Bags.ClampSqueeze(s)
+  s = tonumber(s)
+  if not s then return 0 end
+  return math.max(0, math.min(1, s))
+end
+function Bags.Squeeze() return Bags.ClampSqueeze(DB and DB.bagSqueeze) end
+function Bags.SqueezeSizes(s)                       -- header height, space after a category, row pitch
+  s = Bags.ClampSqueeze(s)
+  local function cut(v) return math.floor(v * s + 0.5) end
+  return HDR - cut(SQ_HDR), SGAP - cut(SQ_GAP), CELL - cut(SQ_ROW)
+end
+function Bags.SqueezeForHeight(want, full, tight)   -- squeeze that makes content `full` pixels tall come out near `want`
+  if not (want and full and tight) or full <= tight then return 0 end
+  return Bags.ClampSqueeze(math.floor((full - want) / (full - tight) * 100 + 0.5) / 100)
+end
+function Bags.FitPx(px)                              -- window height for a content height in pixels
+  return Bags.HeadHeight() + FOOT + math.min(MAXROWS * CELL, math.max(MINROWS * CELL, px or 0))
+end
+function Bags.FitHeight(rows) return Bags.FitPx((rows or 0) * CELL) end
+
+-- the left-edge drawer: one button per character you have played, plus All
+local function RefreshDrawer()
+  local d = frame.drawer
+  local chars = CharList()
+  local n = #chars + 1
+  for i = 1, math.max(n, #d.btns) do
+    local t = d.btns[i]
+    if not t then
+      t = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
+      t:SetSize(DRAWER_W - 12, 22)
+      t:SetPoint("TOPRIGHT", d, "TOPRIGHT", -6, -8 - (i - 1) * 24)
+      t:SetScript("OnClick", function(self) viewKey = self.key; viewBank = false; drawer.t = 0; Refresh() end)
+      d.btns[i] = t
+    end
+    if i <= n then
+      local key = (i <= #chars) and chars[i].key or "ALL"
+      t.key = key
+      if key == "ALL" then t:SetText("All characters")
+      else
+        local rec = chars[i].rec
+        t:SetText((rec.name or key) .. (rec.total and (" " .. math.max(0, rec.total - (rec.used or 0))) or ""))
+      end
+      t:Show()
+    else t:Hide() end
+  end
+end
+
+function Refresh()
+  if not (frame and frame:IsShown()) then return end
+  if InCombat() then Bags.needRefresh = true return end      -- secure cells cannot be changed in combat
+  local liveView = (viewKey == nil or viewKey == CharKey()) and not viewBank
+  if liveView then Bags.Snapshot() end
+  local src, rec = Source()
+  local sections, shown
+  if sortMode == "category" then
+    -- every free slot starts in General; it moves out of there as items take slots
+    local free
+    if filterText == "" and viewKey ~= "ALL" and rec then
+      if liveView then free = LiveEmpties()
+      else
+        free = {}
+        for _ = 1, math.max(0, (viewBank and rec.bankTotal or rec.total or 0) - (viewBank and rec.bankUsed or rec.used or 0)) do free[#free + 1] = {} end
+      end
+    end
+    sections = Bags.Sections(src, filterText, free)
+    shown = 0
+    for _, s in ipairs(sections) do shown = shown + #s.items end
+  else
+    local list = Bags.Arrange(src, sortMode, filterText)
+    sections, shown = { { items = list } }, #list
+  end
+  frame.sections = sections
+  local qh, qg, qr = Bags.SqueezeSizes(Bags.Squeeze())
+  local cells, heads, height = Bags.Layout(sections, COLS, CELL, qh, qg, qr)
+  local list = { n = shown }
+  frame.heads = frame.heads or {}
+  for i = 1, math.max(#heads, #frame.heads) do
+    local h, data = frame.heads[i], heads[i]
+    if not h then
+      h = {}
+      h.fs = frame.content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+      h.line = frame.content:CreateTexture(nil, "ARTWORK")
+      h.line:SetColorTexture(.8, .2, .2, .55)
+      frame.heads[i] = h
+    end
+    if data then
+      h.fs:ClearAllPoints(); h.fs:SetPoint("TOPLEFT", frame.content, "TOPLEFT", 2, -data.y)
+      h.fs:SetText(("%s |cff999999%d|r"):format(data.name, data.n))
+      h.line:ClearAllPoints(); h.line:SetSize(COLS * CELL - GAP, 1)
+      h.line:SetPoint("TOPLEFT", frame.content, "TOPLEFT", 0, -(data.y + qh - 3))
+      h.fs:Show(); h.line:Show()
+    else h.fs:Hide(); h.line:Hide() end
+  end
+  for i = 1, math.max(#cells, #buttons) do
+    local c = cells[i]
+    local it = c and c.item
+    local b = Cell(i)
+    if c then
+      b:ClearAllPoints()
+      b:SetPoint("TOPLEFT", frame.content, "TOPLEFT", c.x, -c.y)
+    end
+    if c and c.empty then
+      b.icon:SetColorTexture(.08, .08, .1, .55)
+      b.count:SetText(""); b.lvl:SetText("")
+      b.border:SetColorTexture(1, 1, 1, 0)
+      b.item, b.eBag, b.eSlot, b.live = nil, c.bag, c.slot, liveView
+      Arm(b, nil, false)
+      b:Show()
+    elseif it then
+      b.icon:SetTexture(it.icon or 134400)
+      b.count:SetText(it.count > 1 and it.count or "")
+      local c = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[it.q]
+      if Bags.Opt("quality") and c and it.q and it.q > 1 then b.border:SetColorTexture(c.r, c.g, c.b, .35) else b.border:SetColorTexture(1, 1, 1, 0) end
+      local gear = (it.cls == 2 or it.cls == 4) and it.ilvl and it.ilvl > 1
+      b.lvl:SetText((Bags.Opt("ilvl") and gear) and tostring(it.ilvl) or "")
+      b.item, b.eBag, b.eSlot, b.live = it, nil, nil, liveView
+      Arm(b, it, liveView)
+      b:Show()
+    else
+      b.item = nil; Arm(b, nil, false); b:Hide()
+    end
+  end
+  frame.content:SetHeight(math.max(CELL, height))
+  -- no wasted space: the window is only as tall as its items (3 rows least, 13 rows most, then it scrolls)
+  frame:SetHeight(Bags.FitPx(height))
+  -- header: text size and the rows under it follow the font setting
+  local size = Bags.FontSize()
+  local hl = Bags.HeaderLayout(size)
+  frame.money:SetFont(FONT_FILE, size, ""); frame.cur:SetFont(FONT_FILE, size, "")
+  frame.money:ClearAllPoints(); frame.money:SetPoint("TOPLEFT", 10, -hl.money)
+  frame.cur:ClearAllPoints(); frame.cur:SetPoint("TOPLEFT", 10, -hl.cur)
+  frame.handle:ClearAllPoints(); frame.handle:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -10, -hl.handle)
+  frame.headBand:ClearAllPoints()                          -- header band and its gold rule follow the header height
+  frame.headBand:SetPoint("TOPLEFT", 3, -3); frame.headBand:SetPoint("TOPRIGHT", -3, -3); frame.headBand:SetHeight(hl.head - 5)
+  frame.headRule:ClearAllPoints()
+  frame.headRule:SetPoint("TOPLEFT", 8, -(hl.head - 3)); frame.headRule:SetPoint("TOPRIGHT", -8, -(hl.head - 3))
+  frame.sb:ClearAllPoints()
+  frame.sb:SetPoint("TOPLEFT", 10, -hl.head); frame.sb:SetPoint("BOTTOMRIGHT", -10, FOOT)
+  -- header
+  if viewKey == "ALL" then
+    frame.info:SetText(("All characters: %d different items"):format(list.n))
+  elseif rec then
+    local total = viewBank and rec.bankTotal or rec.total or 0
+    local used = viewBank and rec.bankUsed or rec.used or 0
+    local when = (liveView and "live") or (date and date("%b %d %H:%M", viewBank and rec.bankTime or rec.time)) or "saved"
+    frame.info:SetText(("%s - %s"):format(rec.name or viewKey, when))
+    frame.free:SetText(Bags.Opt("free") and Bags.FreeText(used, total) or "")
+  else
+    frame.info:SetText("nothing saved for this character yet")
+  end
+  if viewKey == "ALL" or not rec then frame.free:SetText("") end
+  frame.money:SetText((Bags.Opt("money") and rec and viewKey ~= "ALL") and Bags.MoneyText(rec.money) or "")
+  frame.cur:SetText((Bags.Opt("currency") and rec and viewKey ~= "ALL") and Bags.CurrencyText(rec.cur, size) or "")
+  frame.sortBtn:SetText(SORTS[sortMode])
+  frame.bankBtn:SetText(viewBank and "Bank" or "Bags")
+  RefreshDrawer()
+end
+
+-- the settings panel the gear opens
+local function OptionRows()
+  local function o(key) return function() return Bags.Opt(key) end, function(v) Bags.SetOpt(key, v) end end
+  local rows = {}
+  local function add(label, get, set) rows[#rows + 1] = { label = label, get = get, set = set } end
+  add("Show free slots", o("free"))
+  add("Show gold", o("money"))
+  add("Show currencies", o("currency"))
+  add("Item level on gear", o("ilvl"))
+  add("Colour borders by quality", o("quality"))
+  add("Sell grey items at vendors", function() return ns.DB.autoSell end, function(v) ns.DB.autoSell = v and true or false end)
+  add("Repair at vendors", function() return ns.DB.autoRepair end, function(v) ns.DB.autoRepair = v and true or false end)
+  add("Bag keys open this bag", function() return Bags.On() end, function(v) Bags.Set(v) end)
+  return rows
+end
+Bags.OptionRows = OptionRows
+
+function BuildOptions(f)
+  local rows = OptionRows()
+  local p = CreateFrame("Frame", "RealmBagsOptions", f, BackdropTemplateMixin and "BackdropTemplate" or nil)
+  p:SetSize(220, 14 + #rows * 24 + 34 + 28)
+  p:SetPoint("TOPLEFT", f, "TOPRIGHT", 4, 0)
+  p:SetFrameStrata("HIGH")
+  if ns.UI and ns.UI.Skin then ns.UI.Skin(p) end
+  p.title = p:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  p.title:SetPoint("TOPLEFT", 10, -8); p.title:SetText("Bag settings")
+  p.rows = {}
+  for i, r in ipairs(rows) do
+    local cb = CreateFrame("CheckButton", nil, p, "UICheckButtonTemplate")
+    cb:SetSize(22, 22); cb:SetPoint("TOPLEFT", 8, -24 - (i - 1) * 24)
+    local fs = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetPoint("LEFT", cb, "RIGHT", 4, 0); fs:SetText(r.label)
+    cb:SetScript("OnClick", function(self) r.set(self:GetChecked() and true or false) end)
+    p.rows[i] = { cb = cb, get = r.get }
+  end
+  local delay = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
+  delay:SetSize(200, 22); delay:SetPoint("BOTTOMLEFT", 10, 8)
+  local function DelayText()
+    local d = Bags.Opt("delay")
+    delay:SetText(d > 0 and ("Character drawer closes after " .. d .. "s") or "Character drawer stays open")
+  end
+  delay:SetScript("OnClick", function() Bags.NextDelay(); DelayText() end)
+  local fl = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")      -- gold and currency text size: - and + buttons
+  fl:SetPoint("BOTTOMLEFT", 12, 40)
+  local fminus = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
+  fminus:SetSize(24, 22); fminus:SetText("-"); fminus:SetPoint("BOTTOMRIGHT", -40, 36)
+  local fplus = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
+  fplus:SetSize(24, 22); fplus:SetText("+"); fplus:SetPoint("LEFT", fminus, "RIGHT", 4, 0)
+  local function FontLabel() fl:SetText("Currency text size: " .. Bags.FontSize()) end
+  fminus:SetScript("OnClick", function() Bags.StepFont(-1); FontLabel() end)
+  fplus:SetScript("OnClick", function() Bags.StepFont(1); FontLabel() end)
+  p.fontMinus, p.fontPlus = fminus, fplus
+  p:SetScript("OnShow", function()
+    for _, r in ipairs(p.rows) do r.cb:SetChecked(r.get() and true or false) end
+    FontLabel()
+    DelayText()
+  end)
+  p:Hide()
+  return p
+end
+
+function Bags.ToggleOptions()
+  if not frame then return end
+  frame.options = frame.options or BuildOptions(frame)
+  if frame.options:IsShown() then frame.options:Hide() else frame.options:Show() end
+end
+
+local function Build()
+  local f = CreateFrame("Frame", "RealmBags", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+  f:SetSize(COLS * CELL + 34, 470)
+  local pos = DB.bagPos
+  if pos then f:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4]) else f:SetPoint("RIGHT", UIParent, "RIGHT", -60, 0) end
+  f:SetScale(Bags.ClampScale(DB.bagScale or 1))
+  f:SetClampedToScreen(true); f:SetMovable(true); f:EnableMouse(true)
+  f:RegisterForDrag("LeftButton")
+  f:SetScript("OnDragStart", function(self) if not DB.bagLocked then self:StartMoving() end end)
+  f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing(); SaveFramePos(self) end)
+  f:SetFrameStrata("HIGH")
+  if ns.UI and ns.UI.Skin then ns.UI.Skin(f) end
+  f.leather = f:CreateTexture(nil, "BACKGROUND")           -- warm leather tint over the panel: an open bag
+  f.leather:SetPoint("TOPLEFT", 3, -3); f.leather:SetPoint("BOTTOMRIGHT", -3, 3)
+  f.leather:SetColorTexture(.30, .19, .09, .55)
+  f.headBand = f:CreateTexture(nil, "BORDER")             -- header: darker band holding title, free slots, Alts, gold and the icon cluster
+  f.headBand:SetColorTexture(0, 0, 0, .28)
+  f.headRule = f:CreateTexture(nil, "ARTWORK")
+  f.headRule:SetHeight(1); f.headRule:SetColorTexture(.9, .75, .3, .5)
+  f.footBand = f:CreateTexture(nil, "BORDER")             -- footer: matching band holding sort, bank, clean up, search and the grabber
+  f.footBand:SetPoint("BOTTOMLEFT", 3, 3); f.footBand:SetPoint("BOTTOMRIGHT", -3, 3); f.footBand:SetHeight(FOOT - 5)
+  f.footBand:SetColorTexture(0, 0, 0, .28)
+  f.footRule = f:CreateTexture(nil, "ARTWORK")
+  f.footRule:SetHeight(1); f.footRule:SetColorTexture(.9, .75, .3, .5)
+  f.footRule:SetPoint("BOTTOMLEFT", 8, FOOT - 3); f.footRule:SetPoint("BOTTOMRIGHT", -8, FOOT - 3)
+  f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  f.title:SetPoint("TOPLEFT", 10, -8); f.title:SetText("Realm Bags")
+  f.free = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  f.free:SetPoint("TOPRIGHT", -100, -8)
+  local mini = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  mini:SetSize(22, 20); mini:SetText("_")
+  mini:SetPoint("TOPRIGHT", -26, -4)
+  mini:SetScript("OnClick", function() Bags.Minimize() end)
+  mini:SetScript("OnEnter", function(self)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT"); GameTooltip:AddLine("Fold into the pouch"); GameTooltip:Show()
+  end)
+  mini:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  local gear = CreateFrame("Button", nil, f)               -- settings, hidden behind the gear
+  gear:SetSize(20, 20); gear:SetPoint("TOPRIGHT", -50, -4)
+  gear.tex = gear:CreateTexture(nil, "ARTWORK"); gear.tex:SetAllPoints()
+  gear.tex:SetTexture("Interface\\Buttons\\UI-OptionsButton")
+  gear:SetScript("OnClick", function() Bags.ToggleOptions() end)
+  gear:SetScript("OnEnter", function(self)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT"); GameTooltip:AddLine("Bag settings"); GameTooltip:Show()
+  end)
+  gear:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  local lock = CreateFrame("Button", nil, f)               -- padlock: locked = no moving, no scaling
+  lock:SetSize(18, 18); lock:SetPoint("TOPRIGHT", -74, -5)
+  f.lockTex = lock:CreateTexture(nil, "ARTWORK"); f.lockTex:SetAllPoints()
+  f.lockTex:SetTexture(DB.bagLocked and "Interface\\Buttons\\LockButton-Locked-Up" or "Interface\\Buttons\\LockButton-Unlocked-Up")
+  lock:SetScript("OnClick", function() Bags.SetLocked(not DB.bagLocked) end)
+  lock:SetScript("OnEnter", function(self)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+    GameTooltip:AddLine(DB.bagLocked and "Locked. Click to unlock." or "Unlocked. Click to lock.")
+    GameTooltip:Show()
+  end)
+  lock:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  f.lock = lock
+
+  local grip = CreateFrame("Button", nil, f)               -- bottom-right corner: drag to scale the whole bag
+  grip:SetSize(16, 16); grip:SetPoint("BOTTOMRIGHT", -2, 2)
+  grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+  grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+  grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+  grip:SetFrameLevel(f:GetFrameLevel() + 10)
+  grip:SetScript("OnMouseDown", function()
+    if DB.bagLocked then return end
+    local s = f:GetScale() or 1
+    local l, t = f:GetLeft(), f:GetTop()
+    if not (l and t) then return end
+    f:ClearAllPoints()                                     -- pin the top-left corner so the bag grows from it
+    f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", l * s, t * s)
+    grip.sizing = { l = l * s, t = t * s }
+  end)
+  grip:SetScript("OnUpdate", function()
+    local g = grip.sizing
+    if not g or not GetCursorPosition then return end
+    local cx = GetCursorPosition() / (UIParent:GetEffectiveScale() or 1)
+    local s = Bags.ScaleForWidth(cx - g.l, f:GetWidth())
+    f:SetScale(s)
+    f:ClearAllPoints()
+    f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", g.l / s, g.t / s)
+  end)
+  grip:SetScript("OnMouseUp", function()
+    if not grip.sizing then return end
+    grip.sizing = nil
+    DB.bagScale = f:GetScale()
+    SaveFramePos(f)
+  end)
+  grip:SetScript("OnEnter", function(self)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT"); GameTooltip:AddLine("Drag to scale"); GameTooltip:Show()
+  end)
+  grip:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  f.grip = grip
+  if DB.bagLocked then grip:Hide() end
+
+  local sq = CreateFrame("Button", nil, f)                 -- a bar on the bottom edge: drag up to shorten the bag, right-click to reset
+  sq:SetHeight(18)                                         -- its own strip along the bottom edge, below the buttons and clear of the scale grip
+  sq:SetPoint("BOTTOMLEFT", 6, 3); sq:SetPoint("BOTTOMRIGHT", -22, 3)
+  sq:SetFrameLevel(f:GetFrameLevel() + 10)
+  sq.strip = sq:CreateTexture(nil, "BACKGROUND")
+  sq.strip:SetAllPoints(); sq.strip:SetColorTexture(0, 0, 0, .25)
+  sq.bar = sq:CreateTexture(nil, "OVERLAY")
+  sq.bar:SetSize(80, 5); sq.bar:SetPoint("CENTER")
+  sq.bar:SetColorTexture(.9, .75, .3, .9)
+  sq:SetScript("OnMouseDown", function(_, btn)
+    if btn == "RightButton" or DB.bagLocked then return end
+    local s = f:GetScale() or 1
+    local l, t = f:GetLeft(), f:GetTop()
+    if not (l and t) then return end
+    f:ClearAllPoints()                                     -- pin the top-left corner so only the bottom edge moves
+    f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", l, t)    -- GetLeft/GetTop are already in the bag's own scale: no multiplying, or the bag jumps
+    sq.sizing = { top = t * s }
+  end)
+  sq:SetScript("OnUpdate", function()
+    local g = sq.sizing
+    if not g or not GetCursorPosition then return end
+    local _, cy = GetCursorPosition()
+    local h = (g.top - cy / (UIParent:GetEffectiveScale() or 1)) / (f:GetScale() or 1)
+    local secs = f.sections
+    if not secs then return end
+    -- content height the cursor asks for, against the loosest and tightest layouts of what is in the bag now
+    local function tall(s) local a, b, c = Bags.SqueezeSizes(s); local _, _, ht = Bags.Layout(secs, COLS, CELL, a, b, c); return ht end
+    local s = Bags.SqueezeForHeight(h - Bags.HeadHeight() - FOOT, tall(0), tall(1))
+    if s ~= Bags.Squeeze() then DB.bagSqueeze = s; Refresh() end
+  end)
+  sq:SetScript("OnMouseUp", function(_, btn)
+    if btn == "RightButton" then
+      if not DB.bagLocked then DB.bagSqueeze = nil; Refresh() end
+      return
+    end
+    if not sq.sizing then return end
+    sq.sizing = nil
+    SaveFramePos(f)
+  end)
+  sq:SetScript("OnEnter", function(self)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:AddLine("Drag up to squeeze the space between items")
+    GameTooltip:AddLine("Drag down to loosen it, right-click to reset", .8, .8, .8)
+    GameTooltip:Show()
+  end)
+  sq:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  f.squeeze = sq
+  if DB.bagLocked then sq:Hide() end
+
+  f.info = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  f.info:SetPoint("TOPLEFT", 10, -28)
+  f.cur = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  f.cur:SetPoint("TOPLEFT", 10, -56)
+  f.money = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")     -- gold, silver, copper on their own line
+  f.money:SetPoint("TOPLEFT", 10, -42)
+  local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+  close:SetPoint("TOPRIGHT", 2, 2)
+
+  -- character drawer: a handle on the left edge slides the list out; it slides back after the delay or on minimize
+  local handle = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")   -- the "<-Alts" button under the currencies
+  handle:SetSize(64, 18)
+  handle:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -Bags.HeaderLayout(Bags.FontSize()).handle)
+  handle:SetText("<-Alts")
+  local d = CreateFrame("Frame", nil, f, BackdropTemplateMixin and "BackdropTemplate" or nil)
+  d:SetPoint("TOPRIGHT", f, "TOPLEFT", -18, 0)
+  d:SetPoint("BOTTOMRIGHT", f, "BOTTOMLEFT", -18, 0)
+  d:SetWidth(1)
+  if d.SetClipsChildren then d:SetClipsChildren(true) end
+  if ns.UI and ns.UI.Skin then ns.UI.Skin(d) end
+  d.btns = {}
+  d:Hide()
+  f.handle, f.drawer = handle, d
+  handle:SetScript("OnClick", function()
+    drawer.open = not drawer.open; drawer.t = 0
+  end)
+  handle:SetScript("OnEnter", function(self)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT"); GameTooltip:AddLine("Your characters' bags"); GameTooltip:Show()
+  end)
+  handle:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  f:SetScript("OnUpdate", function(_, dt)
+    if drawer.w <= 0 and not drawer.open then return end
+    Bags.DrawerStep(drawer, dt, d:IsMouseOver() or handle:IsMouseOver(), Bags.Opt("delay"), DRAWER_W)
+    d:SetWidth(math.max(1, drawer.w))
+    if drawer.w > 0 then d:Show() else d:Hide() end
+  end)
+  f:SetScript("OnHide", function()
+    drawer.open, drawer.w, drawer.t = false, 0, 0
+    d:SetWidth(1); d:Hide()
+    if f.options then f.options:Hide() end
+  end)
+
+  local sb = CreateFrame("ScrollFrame", nil, f)
+  f.sb = sb
+  sb:SetPoint("TOPLEFT", 10, -Bags.HeadHeight()); sb:SetPoint("BOTTOMRIGHT", -10, FOOT)
+  local content = CreateFrame("Frame", nil, sb)
+  content:SetSize(COLS * CELL, 100)
+  sb:SetScrollChild(content)
+  sb:EnableMouseWheel(true)
+  sb:SetScript("OnMouseWheel", function(self, d)
+    local cur = self:GetVerticalScroll()
+    local max = math.max(0, content:GetHeight() - self:GetHeight())
+    self:SetVerticalScroll(math.min(max, math.max(0, cur - d * CELL * 2)))
+  end)
+  f.content = content
+
+  local sortBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  sortBtn:SetSize(86, 22); sortBtn:SetPoint("BOTTOMLEFT", 10, 28)
+  sortBtn:SetScript("OnClick", function()
+    for i, k in ipairs(SORT_ORDER) do
+      if k == sortMode then sortMode = SORT_ORDER[i % #SORT_ORDER + 1]; break end
+    end
+    DB.bagSort = sortMode
+    Refresh()
+  end)
+  f.sortBtn = sortBtn
+
+  local bankBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  bankBtn:SetSize(56, 22); bankBtn:SetPoint("LEFT", sortBtn, "RIGHT", 4, 0)
+  bankBtn:SetScript("OnClick", function()
+    if viewKey == "ALL" then return end
+    viewBank = not viewBank; Refresh()
+  end)
+  f.bankBtn = bankBtn
+
+  local clean = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  clean:SetSize(80, 22); clean:SetPoint("LEFT", bankBtn, "RIGHT", 4, 0)
+  clean:SetText("Clean up")
+  clean:SetScript("OnClick", function()
+    if InCombatLockdown and InCombatLockdown() then Print("not in combat.") return end
+    local fn = (CC and CC.SortBags) or SortBags
+    if fn then pcall(fn) end
+    C_Timer.After(1.2, Refresh)
+  end)
+
+  local dropBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  dropBtn:SetSize(40, 22); dropBtn:SetPoint("LEFT", clean, "RIGHT", 4, 0)
+  dropBtn:SetScript("OnClick", function() Bags.SetDrop(not Bags.DropOn()) end)
+  dropBtn:SetScript("OnEnter", function(self)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:AddLine("Drop " .. (Bags.DropOn() and "|cff66ff66(on)|r" or "|cffaaaaaa(off)|r"))
+    GameTooltip:AddLine(Bags.DROP_HELP, 1, 1, 1, true)
+    GameTooltip:AddLine("Dropped items are destroyed. Only grey items and white armor or weapons drop. Uncommon and better, profession items, consumables, quest and unsellable items are never touched.", .7, .7, .7, true)
+    GameTooltip:Show()
+  end)
+  dropBtn:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  f.dropBtn = dropBtn
+  PaintDrop()
+
+  local eb = CreateFrame("EditBox", nil, f, "InputBoxTemplate")          -- the footer's right end; minimize lives in the header only
+  eb:SetSize(112, 20); eb:SetPoint("BOTTOMRIGHT", -12, 29); eb:SetAutoFocus(false)
+  eb.hint = eb:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")  -- faint "search" label while the box is empty
+  eb.hint:SetPoint("LEFT", 2, 0); eb.hint:SetText("search")
+  eb:SetScript("OnTextChanged", function(self)
+    filterText = self:GetText() or ""
+    if filterText == "" then self.hint:Show() else self.hint:Hide() end
+    Refresh()
+  end)
+  eb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  f.search = eb
+  f:SetScript("OnShow", function() Refresh() end)
+  f:Hide()
+  return f
+end
+
+function Bags.Show(key)
+  if not DB then return end
+  frame = frame or Build()
+  if key then viewKey = key; viewBank = false end
+  DB.bagMin = false; UpdatePouch()
+  frame:Show(); Refresh()
+end
+function Bags.Hide() if frame then frame:Hide() end end
+function Bags.Toggle()
+  if not DB then return end
+  frame = frame or Build()
+  if frame:IsShown() then Bags.Minimize() else viewKey = nil; viewBank = false; Bags.Show() end   -- B again folds back to the pouch, never leaves nothing on screen
+end
+
+-- ------------------------------------------------------------ one-bag takeover
+function Bags.On() return DB and DB.oneBag and true or false end
+function Bags.Set(v)
+  DB.oneBag = v and true or false
+  Print("one bag: " .. (DB.oneBag and "ON. Your bag keys now open the Realm bag." or "off. The normal bags are back."))
+end
+
+local function HideDefaults()
+  if InCombatLockdown and InCombatLockdown() then return end
+  for i = 1, 13 do
+    local f = _G["ContainerFrame" .. i]
+    if f and f.Hide then pcall(f.Hide, f) end
+  end
+  if _G.ContainerFrameCombinedBags and ContainerFrameCombinedBags.Hide then pcall(ContainerFrameCombinedBags.Hide, ContainerFrameCombinedBags) end
+end
+
+local function HookKeys()
+  local function opener() if Bags.On() then Bags.Show(); C_Timer.After(0, HideDefaults) end end
+  local function closer() if Bags.On() then Bags.Hide() end end
+  local function toggler()
+    if not Bags.On() then return end
+    HideDefaults()
+    Bags.Toggle()
+  end
+  for _, n in ipairs({ "OpenAllBags", "OpenBackpack" }) do if _G[n] then pcall(hooksecurefunc, n, opener) end end
+  for _, n in ipairs({ "CloseAllBags", "CloseBackpack" }) do if _G[n] then pcall(hooksecurefunc, n, closer) end end
+  for _, n in ipairs({ "ToggleAllBags", "ToggleBackpack" }) do if _G[n] then pcall(hooksecurefunc, n, toggler) end end
+end
+
+-- ------------------------------------------------------------ commands + events
+function Bags.Command(arg)
+  arg = (arg or ""):lower()
+  local sub, rest = arg:match("^(%S*)%s*(.-)$")
+  if sub == "on" then Bags.Set(true)
+  elseif sub == "off" then Bags.Set(false)
+  elseif sub == "sort" then
+    if SORTS[rest] then sortMode = rest; DB.bagSort = rest; Refresh(); Print("sorted by " .. SORTS[rest])
+    else Print("sort modes: category, bag, type, quality, name, value") end
+  elseif sub == "lock" then Bags.SetLocked(true); Print("bag locked.")
+  elseif sub == "unlock" then Bags.SetLocked(false); Print("bag unlocked.")
+  elseif sub == "scale" then
+    local n = tonumber(rest)
+    if n then Bags.SetScaleValue(n); Print("bag scale: " .. DB.bagScale) else Print("usage: /realm bags scale 0.6 - 2") end
+  elseif sub == "fontsize" then
+    local n = tonumber(rest)
+    if n then Bags.SetOpt("fontSize", Bags.ClampFont(n)); Print("currency text size: " .. Bags.FontSize()) else Print("usage: /realm bags fontsize 9-20") end
+  elseif sub == "squeeze" then
+    local n = tonumber(rest)
+    if n then DB.bagSqueeze = Bags.ClampSqueeze(n / 100); Refresh(); Print("bag squeeze: " .. math.floor(Bags.Squeeze() * 100 + 0.5) .. "%")
+    elseif rest == "off" then DB.bagSqueeze = nil; Refresh(); Print("bag squeeze: off")
+    else Print("usage: /realm bags squeeze 0-100 | off") end
+  elseif sub == "drop" then
+    if rest == "on" or rest == "off" then Bags.SetDrop(rest == "on")
+    elseif rest == "debug on" or rest == "debug off" then
+      DB.bagDropDebug = (rest == "debug on") or nil
+      Print("drop debug: " .. (DB.bagDropDebug and "ON. Loot events and the reason for every skipped drop are printed." or "off."))
+    else Print("drop is " .. (Bags.DropOn() and "ON" or "off") .. ". " .. DROP_HELP .. " Use /realm bags drop on|off, or drop debug on|off.") end
+  elseif sub == "forget" then
+    local key = rest ~= "" and rest or nil
+    for k in pairs(DB.bags) do if key and k:lower():find(key, 1, true) and k ~= CharKey() then DB.bags[k] = nil; Print("forgot " .. k) end end
+  elseif sub == "help" then
+    Print("/realm bags (open) | on | off | sort category|bag|type|quality|name|value | lock | unlock | scale 0.6-2 | fontsize 9-20 | squeeze 0-100|off | drop on|off | forget <character>")
+  else Bags.Toggle() end
+end
+
+local ev = CreateFrame("Frame")
+ev:RegisterEvent("PLAYER_LOGIN")
+ev:RegisterEvent("PLAYER_LOGOUT")
+for _, e in ipairs({ "BAG_UPDATE_DELAYED", "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYER_MONEY", "LOOT_READY", "LOOT_OPENED", "LOOT_CLOSED", "UI_ERROR_MESSAGE", "PLAYER_REGEN_ENABLED" }) do pcall(ev.RegisterEvent, ev, e) end
+local pending
+-- auto-loot can leave items behind with no error text we recognise: a short while after the window opens, if loot is
+-- still waiting and there is no free slot, treat it as a full-bag loot
+local function CheckStuckLoot()
+  if not (DB and Bags.DropOn() and lootOpen) then return end
+  local n = (GetNumLootItems and GetNumLootItems()) or 0
+  if n == 0 then return end
+  if #LiveEmpties() > 0 then Dbg("loot still open but bags have free slots, leaving it"); return end
+  local auto = GetCVarBool and GetCVarBool("autoLootDefault")
+  if IsModifiedClick and IsModifiedClick("AUTOLOOTTOGGLE") then auto = not auto end
+  if not auto then Dbg("loot open, bags full, but auto-loot is off: waiting for the full-bag error"); return end
+  Bags.TryDrop("loot stayed open with no free slot")
+end
+ev:SetScript("OnEvent", function(_, e, a1, a2)
+  if e == "LOOT_READY" then lootStamp = Now(); return
+  elseif e == "LOOT_OPENED" then
+    lootOpen, dropBusy, drops, lootStamp = true, false, 0, Now()
+    Dbg("loot opened")
+    if C_Timer and DB and Bags.DropOn() then C_Timer.After(0.6, CheckStuckLoot) end
+    return
+  elseif e == "LOOT_CLOSED" then lootOpen, dropBusy, lootStamp = false, false, Now(); Dbg("loot closed"); return
+  elseif e == "UI_ERROR_MESSAGE" then
+    local msg = (type(a2) == "string" and a2) or (type(a1) == "string" and a1) or nil   -- (errorType, message) in current clients
+    if DB and DB.bagDropDebug and msg and LootActive() then Dbg("error text while looting: '" .. msg .. "'") end
+    if DB and IsFullMsg(msg) then Bags.TryDrop("full-bag error") end
+    return
+  elseif e == "PLAYER_REGEN_ENABLED" then
+    if Bags.needRefresh then Bags.needRefresh = false; if frame and frame:IsShown() then Refresh() end end
+    return
+  end
+  if e == "PLAYER_LOGIN" then
+    DB = ns.DB
+    DB.bags = DB.bags or {}
+    if DB.oneBag == nil then DB.oneBag = false end
+    sortMode = DB.bagSort or "category"
+    HookKeys()
+    DB.bagMin = true            -- every login starts minimized: the pouch is there at once, no B press needed
+    UpdatePouch()
+    C_Timer.After(3, function() Bags.Snapshot(); UpdatePouch() end)
+  elseif not DB then return
+  elseif e == "PLAYER_LOGOUT" then
+    Bags.Snapshot()
+  elseif e == "BANKFRAME_OPENED" then
+    bankOpen = true
+    C_Timer.After(0.5, function() Bags.Snapshot() end)
+  elseif e == "BANKFRAME_CLOSED" then
+    Bags.Snapshot(); bankOpen = false
+  else
+    if pending then return end
+    pending = true
+    C_Timer.After(0.5, function()
+      pending = false
+      Bags.Snapshot()
+      if frame and frame:IsShown() then Refresh() end
+    end)
+  end
+end)

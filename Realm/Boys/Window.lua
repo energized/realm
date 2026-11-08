@@ -349,7 +349,7 @@ function build.settings()
     Add({ title = "Update macros when I learn skills", desc = "Rebuilds your Realm macros with your newest spells after you learn them or change talents or spec. Off leaves them alone until you run /realm macros.",
           btn = { autoOn and "ON" or "OFF", function() TB.Macros.SetAuto(not TB.Macros.AutoOn()); Win.Rebuild() end, autoOn and TONE_ON or TONE_OFF },
           bar = autoOn and { .3, 1, .6 } or { .3, .3, .35 } })
-    Add({ title = "Build my macros now", desc = "Hotbars 1 to 4 and the main bar for your class and spec. Same as /realm macros.",
+    Add({ title = "Build my macros now", desc = "Main bar pages 1 to 5 (solo, party, battlegrounds, small dungeon, raid) for your class and spec. Same as /realm macros.",
           btn = { "Build", function() TB.Macros.Install({}) end } })
   end
 

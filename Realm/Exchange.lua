@@ -374,6 +374,11 @@ local function Build()
   setBtn:SetPoint("RIGHT", scanBtn, "LEFT", -6, 0)
   setBtn:SetScript("OnClick", function() ns.Exchange.ShowSettings() end)
 
+  local mailBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  mailBtn:SetSize(60, 20); mailBtn:SetText("Mail")
+  mailBtn:SetPoint("RIGHT", setBtn, "LEFT", -6, 0)
+  mailBtn:SetScript("OnClick", function() if ns.Mail then ns.Mail.Toggle() end end)
+
   for i = 1, ROWS do
     local r = CreateFrame("Button", nil, f)
     r:SetSize(430, 20)
@@ -429,6 +434,15 @@ local function RowText(sig, a)
     return ("|c%s%-5s|r %s x%d  %s  |cffff9933+%d%%|r vs median"):format(c, sig, ItemName(a.id), a.owned, Money(a.cur), math.floor((a.cur / a.med - 1) * 100))
   end
   return ("|c%s%-5s|r %s  %s  |cff33ff66-%d%%|r  profit ~%s"):format(c, sig, ItemName(a.id), Money(a.cur), math.floor(a.disc * 100), Money(a.net))
+end
+
+-- Scan price of one item for the tooltips and the gear popup: current price, median, number of scans, time of the last
+-- scan. nil when the item was never priced (or while the demo data is showing).
+function ns.Exchange.Price(id)
+  local it = store and store ~= demoStore and store[id]
+  local n = it and #it.p or 0
+  if n == 0 then return end
+  return it.p[n], (n >= 3 and median(it.p) or it.p[n]), n, it.t[n]
 end
 
 function ns.Exchange.Refresh()

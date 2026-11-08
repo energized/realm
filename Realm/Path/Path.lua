@@ -11,7 +11,7 @@ local DEFAULTS = {
   hud = true, panel = true, locked = true,
   autoAccept = true, autoTurnin = true, smartReward = true, offRoute = false,
   banner = true, classq = true, corpse = true, levelTips = true,
-  trail = true, friends = true, trainers = true, tapWarn = true, farm = false, professions = true,
+  trail = true, friends = true, trainers = true, tapWarn = true, farm = false, professions = true, dungeonTips = true, npcMarker = true, innTips = true,
   panelMode = "dock", compact = false, boldMarkers = true, travelTips = true, travelGuide = true, discoverFlights = false,
   compassWidth = 560, compassScale = 1,
 }
@@ -52,33 +52,57 @@ local function Objectives(q)
   if ok and type(objs) == "table" then return objs end
 end
 
+-- The quest log writes objectives as "Bear Meat: 1/3" or "Rockjaw Trogg slain: 3/10". Find the one for a step's name:
+-- the whole name first, then a name at the start of the text, and never a name that only sits inside a longer one
+-- ("Rockjaw Trogg" must not match "Burly Rockjaw Trogg").
+local function ObjectiveFor(objs, name)
+  if not (objs and name) then return nil end
+  local lname = name:lower()
+  local prefix
+  for _, o in ipairs(objs) do
+    if o.text and not Secret(o.text) then
+      local head = o.text:lower():match("^(.-)%s*:%s*%d+%s*/%s*%d+") or o.text:lower()
+      head = head:gsub("%s+slain$", ""):gsub("%s+killed$", "")
+      if head == lname then return o end
+      if not prefix and head:sub(1, #lname) == lname and not head:sub(#lname + 1, #lname + 1):match("%w") then prefix = o end
+    end
+  end
+  return prefix
+end
+
 -- true / false when the named objective is finished or not, nil when unknown
 local function ObjectiveDone(q, name)
-  local objs = Objectives(q)
-  if not objs then return nil end
-  name = name and name:lower()
-  for _, o in ipairs(objs) do
-    if name and o.text and not Secret(o.text) and o.text:lower():find(name, 1, true) then return o.finished and true or false end
-  end
+  local o = ObjectiveFor(Objectives(q), name)
+  if o then return o.finished and true or false end
   return nil
 end
 
--- live "3/10" for a kill or collect step
-function Path.ObjectiveProgress(q, name)
+-- live "3/10" for a kill or collect step. kind and cnt are optional: with an item step whose objective cannot be found
+-- by name, the bag count of that item is used instead of another objective's number.
+function Path.ObjectiveProgress(q, name, kind, cnt)
   local objs = Objectives(q)
   if not objs then return nil end
-  local lname = name and name:lower()
-  local first
-  for _, o in ipairs(objs) do
-    if o.text and not Secret(o.text) then
-      local have, need = o.text:match("(%d+)%s*/%s*(%d+)")
-      if have then
-        first = first or { tonumber(have), tonumber(need) }
-        if lname and o.text:lower():find(lname, 1, true) then return tonumber(have), tonumber(need) end
-      end
+  local o = ObjectiveFor(objs, name)
+  if o then
+    local have, need = (o.text or ""):match("(%d+)%s*/%s*(%d+)")
+    if have then return tonumber(have), tonumber(need) end
+  end
+  local counted = {}
+  for _, ob in ipairs(objs) do
+    if ob.text and not Secret(ob.text) then
+      local have, need = ob.text:match("(%d+)%s*/%s*(%d+)")
+      if have then counted[#counted + 1] = { tonumber(have), tonumber(need) } end
     end
   end
-  if first then return first[1], first[2] end
+  if #counted == 1 then return counted[1][1], counted[1][2] end
+  if kind == "item" and name and cnt then
+    local GC = (C_Item and C_Item.GetItemCount) or GetItemCount
+    if GC then
+      local ok, n = pcall(GC, name)
+      if ok and type(n) == "number" then return math.min(n, cnt), cnt end
+    end
+  end
+  return nil
 end
 
 -- ------------------------------------------------------------ positions
@@ -373,6 +397,29 @@ function Path.Back()
   for i = 1, (cur or #steps + 1) - 1 do if S.skip[i] then last = i end end
   if last then S.skip[last] = nil; Path.Changed(true) else Print("nothing to go back to") end
 end
+-- jump ahead to route step i: every step before it that is still open is marked skipped (Back / /path reset undo that)
+function Path.GotoStep(i)
+  if not cur or not i or not steps[i] then return false end
+  -- a kill or hand-in row whose quest is not accepted yet really means its accept step; going straight to the
+  -- later row would skip that accept step and the row itself would then be dropped as unavailable
+  local st = steps[i]
+  if (st.t == "D" or st.t == "T") and st.q and not InLog(st.q) and not Completed(st.q) then
+    local a = aStep[st.q]
+    if a and not S.skip[a] then
+      i = a
+      if i <= cur then Print("accept that quest first, it is your current step") return false end
+    end
+  end
+  -- the list also shows the real step while a trainer stop is on top: picking it puts the trainer off
+  if i == cur and Path.TrainerStop() then S.trainSkip = Tier(Path.Level()); Path.Changed(true) return true end
+  if i <= cur then return false end
+  local lvl = Path.Level()
+  for j = cur, i - 1 do
+    if not S.skip[j] and not Done(steps[j], j, lvl) then S.skip[j] = true end
+  end
+  Path.Changed(true)
+  return true
+end
 function Path.SkipChapter()
   if not cur then return end
   local ch = steps[cur].ch
@@ -461,7 +508,7 @@ end)
 local OPTS = { accept = "autoAccept", handin = "autoTurnin", turnin = "autoTurnin", reward = "smartReward", off = "offRoute",
                banner = "banner", corpse = "corpse", tips = "levelTips", trail = "trail",
                friends = "friends", trainers = "trainers", taken = "tapWarn", professions = "professions",
-               compact = "compact", bold = "boldMarkers" }
+               compact = "compact", bold = "boldMarkers", marker = "npcMarker" }
 
 SLASH_REALMPATH1 = "/path"
 SLASH_REALMPATH2 = "/rp"
@@ -489,7 +536,8 @@ SlashCmdList["REALMPATH"] = function(msg)
     local k = OPTS[cmd]; O[k] = not O[k]; Print(cmd .. (O[k] and " on" or " off")); Path.Changed(true)
   else
     Print("/path (window)  skip  back  chapter  trainer  compass  panel  lock/unlock  width <n>  reset  follow <name>  target")
-    Print("toggles: accept handin reward off banner corpse tips trail friends trainers taken professions")
+    Print("toggles: accept handin reward off banner corpse tips trail friends trainers taken professions marker")
     Print("professions: /path professions pick | set <a> <b> | none | extra | status | stop")
+    Print("inn and hearthstone: /path inn (where to make your home) | /path inn tips | /path hearth (hearth or walk?)")
   end
 end

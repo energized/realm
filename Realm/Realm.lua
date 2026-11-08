@@ -107,8 +107,14 @@ SlashCmdList.REALM = function(msg)
     ns.Tracker.ToggleView()
   elseif msg == "names" then
     ns.Tracker.ToggleNames()
-  elseif msg == "pins" then
+  elseif msg == "pins" or msg == "poi" then
     ns.Tracker.TogglePins()
+  elseif msg == "labels" or msg == "label" then
+    ns.Tracker.ToggleLabels()
+  elseif msg == "nodes" or msg == "node" or msg == "gather" then
+    if ns.Gather then ns.Gather.Command(arg) end
+  elseif msg == "discovered" or msg == "fog" then
+    ns.Tracker.ToggleDiscovered()
   elseif msg == "where" then
     ns.Tracker.Where()
   elseif msg == "deaths" or msg == "dl" then
@@ -117,20 +123,36 @@ SlashCmdList.REALM = function(msg)
     ns.Minimap.Toggle()
   elseif msg == "track" then
     ns.Tracker.SetTrack(arg == "on" and true or arg == "off" and false or nil)
+  elseif msg == "share" or msg == "goal" then
+    ns.Tracker.ToggleShareGoal(arg == "on" and true or arg == "off" and false or nil)
+  elseif msg == "sharenodes" then
+    ns.Tracker.ToggleShareNodes(arg == "on" and true or arg == "off" and false or nil)
   elseif msg == "window" then
     ns.Tracker.Show()
   elseif msg == "scale" then
     ns.Tracker.SetScale(arg)
   elseif msg == "macros" or msg == "macro" then
     if ns.TB and ns.TB.Macros then ns.TB.Macros.Command((full:lower():match("^%s*%S+%s*(.-)%s*$"))) end
+  elseif msg == "bags" or msg == "bag" then
+    if ns.Bags then ns.Bags.Command((full:lower():match("^%s*%S+%s*(.-)%s*$"))) end
+  elseif msg == "mail" or msg == "emf" then
+    if ns.Mail then ns.Mail.Command((full:lower():match("^%s*%S+%s*(.-)%s*$"))) end
+  elseif msg == "tips" or msg == "itemtips" then
+    if ns.ItemInfo then ns.ItemInfo.Command(arg) end
+  elseif msg == "setup" then
+    if ns.Setup then ns.Setup.Show() end
   elseif msg == "stats" then
     Print(("This session: sold junk for %s, spent %s on repairs."):format(Money(sessionSold), Money(sessionRepair)))
   else
     Print("Deaths: /realm deaths (or /dl) | /dl total | /dl quiet | /dl reset")
     Print("Commands: /realm sell | repair | guild | quiet | stats")
     Print("Macros: /realm macros | status | show | spec <name> | force | remove | autoupdate on/off")
+    Print("Bags: /realm bags (one bag, alt tabs) | on | off | sort <mode>   Mail: /realm mail (EMF) | collect | auto | delete | tally")
+    Print("Setup: /realm setup (the first-run questions again)")
     Print("Exchange: /realm ex (market window) | /realm ex help | /realm minimap")
-    Print("Tracker: /realm view | pins | names | where | window | track [on/off] | scale <0.7-3>")
+    Print("Tracker: /realm view | pins (points of interest) | labels | names | where | window | track [on/off] | share [on/off] (tell the party where your compass is heading) | scale <0.7-3>")
+    Print("Dungeons: /path dungeon (what fits you and your group, aims the compass) | /path dungeon tips")
+    Print("Map: /realm discovered (fully discovered map on/off)   Nodes: /realm nodes herb | ore | fish | chest | on | off | clear")
     Print(("sell=%s repair=%s guild=%s quiet=%s"):format(tostring(DB.autoSell), tostring(DB.autoRepair), tostring(DB.useGuild), tostring(DB.quiet)))
   end
 end

@@ -432,6 +432,14 @@ end
 
 local function InCombat() return InCombatLockdown and InCombatLockdown() end
 
+-- the bind / vendor / auction lines under one item column (blank when the item is not cached yet)
+local function Extras(x, link, bound)
+  local II = ns.ItemInfo
+  local b, v, a
+  if II and link then b, v, a = II.Brief(link, bound) end
+  x.bind:SetText(b or ""); x.vendor:SetText(v or ""); x.ah:SetText(a or "")
+end
+
 local function Fill(f, u)
   local spec = TB.Spec()
   local pct = u.empty and "empty slot" or ("+" .. math.floor(u.pct + .5) .. "%")
@@ -439,7 +447,8 @@ local function Fill(f, u)
   f.pct:SetText("|cffffd24a" .. pct .. "|r")
   f.newIcon:SetTexture(u.icon or 134400)
   f.newName:SetText(u.link)
-  f.newInfo:SetText("Item level " .. (u.ilvl or "?") .. ((u.boe and "   |cffff8040binds on equip|r") or ""))
+  f.newInfo:SetText("Item level " .. (u.ilvl or "?"))
+  Extras(f.newX, u.link, not u.boe)
   if u.curLink then
     local _, _, _, _, cicon = FullInfo(u.curLink)
     f.curIcon:SetTexture(cicon or 134400)
@@ -450,6 +459,7 @@ local function Fill(f, u)
     f.curName:SetText("|cff888888Nothing equipped|r")
     f.curInfo:SetText("")
   end
+  Extras(f.curX, u.curLink, true)
   local rows = Gear.Compare(u.link, u.curLink, spec)
   local n = math.min(#rows, MAXROWS)
   for i = 1, MAXROWS do
@@ -469,7 +479,7 @@ local function Fill(f, u)
   f.noStats:SetShown(n == 0)
   local note = u.combo and "weapon swap: this changes your main hand and off hand" or ""
   f.note:SetText(note)
-  local h = 96 + math.max(n, 1) * ROWH + (note ~= "" and 14 or 0) + 44
+  local h = 136 + math.max(n, 1) * ROWH + (note ~= "" and 14 or 0) + 44
   f:SetHeight(h)
 end
 
@@ -530,10 +540,17 @@ local function BuildPopup()
     if info.SetWordWrap then info:SetWordWrap(false) end
     local hit = CreateFrame("Frame", nil, f)
     hit:SetAllPoints(bg); hit:EnableMouse(true)
-    return ic, name, info, hit
+    -- bind (BoP / BoE), vendor price, auction price: three short lines under the icon
+    local ex = {}
+    for i, key in ipairs({ "bind", "vendor", "ah" }) do
+      ex[key] = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      ex[key]:SetPoint("TOPLEFT", x, -88 - (i - 1) * 13); ex[key]:SetWidth(200); ex[key]:SetJustifyH("LEFT")
+      if ex[key].SetWordWrap then ex[key]:SetWordWrap(false) end
+    end
+    return ic, name, info, hit, ex
   end
-  f.curIcon, f.curName, f.curInfo, f.curHit = Column(14, "EQUIPPED")
-  f.newIcon, f.newName, f.newInfo, f.newHit = Column(222, "NEW")
+  f.curIcon, f.curName, f.curInfo, f.curHit, f.curX = Column(14, "EQUIPPED")
+  f.newIcon, f.newName, f.newInfo, f.newHit, f.newX = Column(222, "NEW")
   local function Tip(hit, which)
     hit:SetScript("OnEnter", function(self)
       local u = Gear.popupCurrent
@@ -545,11 +562,11 @@ local function BuildPopup()
   Tip(f.curHit, "cur"); Tip(f.newHit, "new")
 
   local line = f:CreateTexture(nil, "ARTWORK")
-  line:SetPoint("TOPLEFT", 12, -92); line:SetPoint("TOPRIGHT", -12, -92); line:SetHeight(1); line:SetColorTexture(.173, .231, .302, 1)
+  line:SetPoint("TOPLEFT", 12, -132); line:SetPoint("TOPRIGHT", -12, -132); line:SetHeight(1); line:SetColorTexture(.173, .231, .302, 1)
 
   f.rows = {}
   for i = 1, MAXROWS do
-    local y = -98 - (i - 1) * ROWH
+    local y = -138 - (i - 1) * ROWH
     local r = {}
     r.label = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     r.label:SetPoint("TOPLEFT", 16, y); r.label:SetWidth(150); r.label:SetJustifyH("LEFT")
@@ -560,7 +577,7 @@ local function BuildPopup()
     f.rows[i] = r
   end
   f.noStats = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  f.noStats:SetPoint("TOPLEFT", 16, -100); f.noStats:SetText("No stat differences to show. Hover the icons for full tooltips.")
+  f.noStats:SetPoint("TOPLEFT", 16, -140); f.noStats:SetText("No stat differences to show. Hover the icons for full tooltips.")
   f.note = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   f.note:SetPoint("BOTTOMLEFT", 16, 42)
   f.more = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")

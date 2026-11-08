@@ -5,6 +5,7 @@ local peers = {}            -- short name -> { map, x, y, t }
 local DB
 local frame, driver
 local rows, dots, pins = {}, {}, {}
+local nodePins, MAXNODES = {}, 200
 local MAXPINS = 40
 local MAXROWS, MAXDOTS = 10, 40
 local STALE = 8
@@ -15,6 +16,8 @@ local COLORS = {
 
 local RING = "Interface\\AddOns\\Realm\\ring"
 local DISC = "Interface\\AddOns\\Realm\\disc"
+local ARROW = "Interface\\AddOns\\Realm\\Path\\icons\\arrow"
+local TEXDIR = "Interface\\AddOns\\Realm\\Path\\icons\\"
 local CLASS_ART = "Interface\\TargetingFrame\\UI-Classes-Circles"
 local CLASS_TC = {
   WARRIOR = { 0, .25, 0, .25 }, MAGE = { .25, .5, 0, .25 }, ROGUE = { .5, .75, 0, .25 },
@@ -138,13 +141,132 @@ local function SendOff()
   if ch then pcall(Send, PREFIX, "OFF", ch) end
 end
 
+-- ---------- sharing my compass goal (what I am heading for, and how) ----------
+local goals = {}                 -- short name -> { kind, map, x, y, pic, label, t } as announced by that player
+local lastGoal, lastGoalAt = nil, 0
+
+local function GoalMessage()
+  local P = ns.Path
+  if not (DB and DB.trackShareGoal ~= false and P and P.ShareTarget) then return "G:-" end
+  local ok, kind, map, x, y, pic, label = pcall(P.ShareTarget)
+  if not ok or not kind then return "G:-" end
+  kind = (tostring(kind):gsub("%W", ""))
+  label = (tostring(label or ""):gsub("[:|%c]", " ")):sub(1, 40)
+  return ("G:%s:%d:%.4f:%.4f:%s:%s"):format(kind, map or 0, x or 0, y or 0, pic or "-", label)
+end
+
+-- sent when the goal changes, and again every few seconds so late joiners and stale entries catch up
+local function SendGoal(force)
+  local ch = GroupChannel()
+  if not ch then return end
+  local msg, now = GoalMessage(), GetTime()
+  local beat = (msg == "G:-") and 20 or 4
+  if not force and msg == lastGoal and now - lastGoalAt < beat then return end
+  lastGoal, lastGoalAt = msg, now
+  pcall(Send, PREFIX, msg, ch)
+end
+
+local function GoalOf(name)
+  local g = goals[name]
+  if g and (GetTime() - g.t) <= 12 then return g end
+end
+
+local function GoalSuffix(kind, pic, label)
+  local P = ns.Path
+  local s = P and P.GoalText and P.GoalText(kind, pic, label)
+  return s and ("  |cffb8c4d0> " .. s .. "|r") or ""
+end
+
+-- ---------- footprints on the map: the compass trail, drawn from a dot to its goal ----------
+local FOOT_R = TEXDIR .. "step.tga"
+local FOOT_L = TEXDIR .. "stepL.tga"
+local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+local feet, trails = {}, {}      -- trails: { ax, ay, bx, by (pixels on the art), c = colour, max = most prints }
+local FOOTS, STEP = 90, 13
+local march, cycle = 0, 0
+
+local function Foot(i)
+  local t = feet[i]
+  if not t then
+    t = frame.dots:CreateTexture(nil, "ARTWORK")
+    t:SetSize(11, 11)
+    t.tex = false
+    feet[i] = t
+  end
+  return t
+end
+
+local function DrawTrails(dt)
+  if not (frame and frame:IsShown()) then return end
+  march = march + (dt or 0) * 9
+  while march >= STEP do march = march - STEP; cycle = cycle + 1 end
+  local n = 0
+  for _, tr in ipairs(trails) do
+    local dx, dy = tr.bx - tr.ax, tr.by - tr.ay
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len > 24 then
+      local ux, uy = dx / len, dy / len
+      local ang = atan2(ux, -uy)                       -- 0 = up the map, clockwise
+      local k, d = 0, 12 + march
+      while d <= len - 10 and k < tr.max and n < FOOTS do
+        k, n = k + 1, n + 1
+        local t = Foot(n)
+        local right = (k + cycle) % 2 == 0
+        local side = right and 3 or -3
+        t:ClearAllPoints()
+        t:SetPoint("CENTER", frame.art, "TOPLEFT", tr.ax + ux * d - uy * side, -(tr.ay + uy * d + ux * side))
+        if t.SetRotation then t:SetRotation(-ang) end   -- toes point at the goal
+        local want = right and FOOT_R or FOOT_L
+        if t.tex ~= want then t:SetTexture(want); t.tex = want end
+        t:SetVertexColor(tr.c[1], tr.c[2], tr.c[3], .95)
+        t:Show()
+        d = d + STEP
+      end
+    end
+  end
+  for i = n + 1, #feet do feet[i]:Hide() end
+end
+
 
 -- ---------- zone map art + zoom ----------
 local viewW, viewH = 204, 204      -- viewport size (follows the window)
 local rowsN = 0
 local zoom = 1
-local artMap, layer = nil, nil
-local tiles = {}
+local artMap, layer, artID = nil, nil, nil
+local tiles, ovTiles = {}, {}
+
+-- Fully discovered map: MapData.lua holds every overlay of every map art, so the fog of unexplored areas is replaced.
+local ovCache = {}
+local OVT = 256   -- overlay pieces are always 256 pixels, whatever the base layer's tile size is
+local function Overlays(id)
+  if not id then return end
+  local c = ovCache[id]
+  if c ~= nil then return c or nil end
+  local raw = ns.MapOverlays and ns.MapOverlays[id]
+  if not raw then ovCache[id] = false return end
+  local list = {}
+  for chunk in raw:gmatch("[^|]+") do
+    local head, ids = chunk:match("^([^:]+):(.+)$")
+    local w, h, ox, oy = (head or ""):match("^(%d+),(%d+),(-?%d+),(-?%d+)$")
+    if w then
+      local files = {}
+      for fid in ids:gmatch("%d+") do files[#files + 1] = tonumber(fid) end
+      list[#list + 1] = { w = tonumber(w), h = tonumber(h), ox = tonumber(ox), oy = tonumber(oy), files = files }
+    end
+  end
+  ovCache[id] = list
+  return list
+end
+
+-- size of one piece (pixels) and of its texture file (next power of two, at least 16) for the last row/column
+local function Piece(total, tile, idx, count)
+  if idx < count then return tile, tile end
+  local px = total % tile
+  if px == 0 then px = tile end
+  local f = 16
+  while f < px do f = f * 2 end
+  return px, f
+end
 
 local function ArtSize()
   if layer then
@@ -201,11 +323,52 @@ local function Relayout()
     t:SetTexture(tex)
     t:Show()
   end
+
+  -- discovered overlays on top of the base art
+  for _, t in ipairs(ovTiles) do t:Hide() end
+  if not (DB and DB.trackDiscovered ~= false) then return end
+  local list = Overlays(artID)
+  if not list then
+    if artID and DB and DB.noOverlayArt ~= artID then
+      DB.noOverlayArt = artID
+      ns.Print("No discovered-map data for map " .. tostring(artMap) .. " (art " .. tostring(artID) .. "); showing the base map only.")
+    end
+    return
+  end
+  local n = 0
+  for _, o in ipairs(list) do
+    local nw, nh = math.ceil(o.w / OVT), math.ceil(o.h / OVT)
+    for j = 1, nh do
+      local ph, fh = Piece(o.h, OVT, j, nh)
+      for k = 1, nw do
+        local fid = o.files[(j - 1) * nw + k]
+        if fid then
+          local pw, fw = Piece(o.w, OVT, k, nw)
+          n = n + 1
+          local t = ovTiles[n]
+          if not t then
+            t = frame.art:CreateTexture(nil, "ARTWORK")
+            ovTiles[n] = t
+          end
+          t:ClearAllPoints()
+          t:SetPoint("TOPLEFT", frame.art, "TOPLEFT", (o.ox + OVT * (k - 1)) * s, -(o.oy + OVT * (j - 1)) * s)
+          t:SetSize(pw * s, ph * s)
+          t:SetTexCoord(0, pw / fw, 0, ph / fh)
+          t:SetTexture(fid)
+          t:Show()
+        end
+      end
+    end
+  end
 end
 
 local function UpdateArt(map)
   if not frame or map == artMap then return end
-  artMap, layer = map, nil
+  artMap, layer, artID = map, nil, nil
+  if map and C_Map and C_Map.GetMapArtID then
+    local ok, id = pcall(C_Map.GetMapArtID, map)
+    if ok then artID = id end
+  end
   if map and C_Map and C_Map.GetMapArtLayers and C_Map.GetMapArtLayerTextures then
     pcall(function()
       local layers = C_Map.GetMapArtLayers(map)
@@ -282,6 +445,22 @@ local function Build()
   f.pdots = CreateFrame("Frame", nil, f.map)           -- player dots: above dungeon pins
   f.pdots:SetAllPoints(f.map)
   f.pdots:SetFrameLevel(f.dots:GetFrameLevel() + 8)
+  local tp = CreateFrame("Button", nil, f.pdots)         -- compass target marker
+  tp:SetSize(22, 22)
+  tp:SetFrameLevel(f.pdots:GetFrameLevel() + 20)
+  tp.tex = tp:CreateTexture(nil, "ARTWORK"); tp.tex:SetAllPoints()
+  tp.txt = tp:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"); tp.txt:SetPoint("CENTER")
+  tp.info = false
+  tp:SetScript("OnEnter", function(self)
+    if not (self.info and GameTooltip) then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(self.info.title)
+    for _, l in ipairs(self.info.lines) do if l ~= "" then GameTooltip:AddLine(l, .8, .8, .8) end end
+    GameTooltip:Show()
+  end)
+  tp:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  tp:Hide()
+  f.tgt = tp
   for i = 1, MAXDOTS do
     local d = CreateFrame("Frame", nil, f.pdots)
     d:SetSize(20, 20)
@@ -290,6 +469,10 @@ local function Build()
     d.ring = d:CreateTexture(nil, "OVERLAY")
     d.ring:SetAllPoints()
     d.ring:SetTexture(RING)
+    d.arrow = d:CreateTexture(nil, "OVERLAY")          -- facing pointer, own dot only
+    d.arrow:SetTexture(ARROW)
+    d.arrow:SetSize(12, 12)
+    d.arrow:Hide()
     local ok, fs = pcall(d.CreateFontString, d, nil, "OVERLAY", "GameFontHighlightSmallOutline")
     if not ok or not fs then fs = d:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall") end
     d.label = fs
@@ -303,19 +486,38 @@ local function Build()
   f.map:SetScript("OnMouseWheel", function(_, delta)
     SetZoom(zoom * (delta > 0 and 1.3 or 1 / 1.3))
   end)
-  local function zbtn(text, x, fn)
+  local bx = -3                      -- bottom row, built right to left
+  local function zbtn(text, w, fn)
     local b = CreateFrame("Button", nil, f.dots, "UIPanelButtonTemplate")
-    b:SetSize(20, 18); b:SetText(text)
-    b:SetPoint("BOTTOMRIGHT", f.map, "BOTTOMRIGHT", x, 3)
+    b:SetSize(w, 18); b:SetText(text)
+    b:SetPoint("BOTTOMRIGHT", f.map, "BOTTOMRIGHT", bx, 3)
+    bx = bx - w - 2
     b:SetScript("OnClick", fn)
     return b
   end
-  zbtn("+", -3, function() SetZoom(zoom * 1.5) end)
-  zbtn("-", -25, function() SetZoom(zoom / 1.5) end)
-  f.viewBtn = zbtn("Zone", -47, function() ns.Tracker.ToggleView() end)
-  f.viewBtn:SetWidth(44)
-  f.pinBtn = zbtn("Pins", -93, function() ns.Tracker.TogglePins() end)
-  f.pinBtn:SetWidth(36)
+  zbtn("+", 20, function() SetZoom(zoom * 1.5) end)
+  zbtn("-", 20, function() SetZoom(zoom / 1.5) end)
+  f.viewBtn = zbtn("Zone", 40, function() ns.Tracker.ToggleView() end)
+  f.pinBtn = zbtn("POI", 32, function() ns.Tracker.TogglePins() end)
+  f.lblBtn = zbtn("Labels", 44, function() ns.Tracker.ToggleLabels() end)
+  f.nodeBtn = zbtn("Nodes", 40, function()
+    if ns.Gather then ns.Gather.SetAll(not ns.Gather.AnyOn()) end
+  end)
+
+  -- one toggle per node type (herbs, ore, fishing, chests), along the top edge of the map
+  f.kindBtns = {}
+  if ns.Gather then
+    local x = -3
+    for _, kind in ipairs(ns.Gather.Order()) do
+      local b = CreateFrame("Button", nil, f.dots, "UIPanelButtonTemplate")
+      b:SetSize(44, 18)
+      b:SetPoint("TOPRIGHT", f.map, "TOPRIGHT", x, -3)
+      b:SetScript("OnClick", function() ns.Gather.Toggle(kind) end)
+      b.kind = kind
+      f.kindBtns[#f.kindBtns + 1] = b
+      x = x - 46
+    end
+  end
 
   -- maximize toggle
   local maxb = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -328,6 +530,7 @@ local function Build()
     r:SetPoint("TOPLEFT", f.map, "BOTTOMLEFT", 0, -6 - (i - 1) * 16)
     r:SetPoint("TOPRIGHT", f.map, "BOTTOMRIGHT", 0, -6 - (i - 1) * 16)
     r:SetJustifyH("LEFT")
+    if r.SetWordWrap then r:SetWordWrap(false) end      -- a long goal must not spill onto the next row
     rows[i] = r
   end
 
@@ -348,6 +551,34 @@ local function Build()
   return f
 end
 
+-- pin colours: dungeons by fit for your group's lowest level, farming spots gold
+local FITCOL = { ok = { .4, 1, .4 }, low = { 1, .8, .2 }, easy = { .6, .6, .6 }, locked = { 1, .35, .35 }, farm = { 1, .82, .2 } }
+local farmCache
+
+-- small markers for where each party member is heading
+local pmarks, MAXPM = {}, 8
+local function PeerMark(i)
+  local m = pmarks[i]
+  if m then return m end
+  m = CreateFrame("Button", nil, frame.pdots)
+  m:SetSize(18, 18)
+  m:SetFrameLevel(frame.pdots:GetFrameLevel() + 15)
+  m.ring = m:CreateTexture(nil, "BACKGROUND"); m.ring:SetAllPoints(); m.ring:SetTexture(RING)
+  m.tex = m:CreateTexture(nil, "ARTWORK"); m.tex:SetSize(12, 12); m.tex:SetPoint("CENTER")
+  m.txt = m:CreateFontString(nil, "OVERLAY", "GameFontNormal"); m.txt:SetPoint("CENTER")
+  m.info = false
+  m:SetScript("OnEnter", function(self)
+    if not (self.info and GameTooltip) then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(self.info.title)
+    for _, l in ipairs(self.info.lines) do if l ~= "" then GameTooltip:AddLine(l, .8, .8, .8, true) end end
+    GameTooltip:Show()
+  end)
+  m:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  pmarks[i] = m
+  return m
+end
+
 local function Hex(c)
   return ("%02x%02x%02x"):format(math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255))
 end
@@ -364,6 +595,7 @@ local function Refresh()
   local disp = myMap
   if DB.trackView == "continent" and hasPos then disp = ContinentOf(myMap) or myMap end
   UpdateArt(disp)
+  trails = {}                    -- rebuilt each refresh; DrawTrails animates them every frame
   local now = GetTime()
   local me = UnitName("player")
 
@@ -379,7 +611,14 @@ local function Refresh()
 
   frame.title:SetText(DB.track and "Realm |cff00ff00● sharing|r" or "Realm |cffff4040● not sharing|r")
   frame.viewBtn:SetText(DB.trackView == "continent" and "Cont" or "Zone")
-  frame.pinBtn:SetText(DB.trackPins ~= false and "Pins" or "|cff888888Pins|r")
+  frame.pinBtn:SetText(DB.trackPins ~= false and "POI" or "|cff888888POI|r")
+  frame.lblBtn:SetText(DB.trackLabels ~= false and "Labels" or "|cff888888Labels|r")
+  frame.nodeBtn:SetText((ns.Gather and ns.Gather.AnyOn()) and "Nodes" or "|cff888888Nodes|r")
+  for _, b in ipairs(frame.kindBtns or {}) do
+    local c = ns.Gather.Color(b.kind)
+    local name = ns.Gather.Short(b.kind)
+    b:SetText(ns.Gather.Enabled(b.kind) and ("|cff" .. Hex(c) .. name .. "|r") or ("|cff666666" .. name .. "|r"))
+  end
   local label = disp and MapName(disp) or "No map data here"
   if myMap and not hasPos then label = label .. " (instance)" end
   frame.zone:SetText(label)
@@ -420,6 +659,13 @@ local function Refresh()
         text = ("|cff%s%s|r  %s%s"):format(Hex(c), p.name,
           yd and (math.floor(yd) .. " yd") or "?", where)
       end
+      if p.self then
+        local okg, gk, _, _, _, gpic, glabel = pcall(ns.Path and ns.Path.ShareTarget or function() end)
+        if okg and gk then text = text .. GoalSuffix(gk, gpic, glabel) end
+      elseif not stale then
+        local g = GoalOf(p.name)
+        if g then text = text .. GoalSuffix(g.kind, g.pic, g.label) end
+      end
       rows[i]:SetText(text)
     end
     local dx, dy
@@ -427,7 +673,7 @@ local function Refresh()
     if dx and di < MAXDOTS then
       di = di + 1
       local d = dots[di]
-      local size = p.self and 28 or 22
+      local size = p.self and 22 or 18
       d:SetSize(size, size)
       d.icon:SetSize(size * .8, size * .8)
       local tc = ClassCoords(p.class)
@@ -444,6 +690,22 @@ local function Refresh()
       d.label:SetText(p.name)
       d.label:SetTextColor(c[1], c[2], c[3])
       d.label:SetShown(DB.trackNames ~= false)
+      -- facing pointer: my own dot only, sitting on the rim in the direction I face
+      if p.self and GetPlayerFacing then
+        local okf, face = pcall(GetPlayerFacing)
+        if okf and face and not (issecretvalue and issecretvalue(face)) then
+          local r = size * .5 + 4
+          d.arrow:ClearAllPoints()
+          d.arrow:SetPoint("CENTER", d, "CENTER", -math.sin(face) * r, math.cos(face) * r)
+          d.arrow:SetRotation(face)
+          d.arrow:SetVertexColor(1, 1, 1)
+          d.arrow:Show()
+        else
+          d.arrow:Hide()
+        end
+      else
+        d.arrow:Hide()
+      end
       d:SetFrameLevel(frame.pdots:GetFrameLevel() + (p.self and 30 or di))
       d:ClearAllPoints()
       d:SetPoint("CENTER", frame.art, "TOPLEFT", dx * aw, -dy * ah)
@@ -452,36 +714,187 @@ local function Refresh()
   end
   for i = di + 1, MAXDOTS do dots[i]:Hide() end
 
-  -- dungeon entrance pins
-  local ents = (DB.trackPins ~= false and disp and hasPos) and Entrances(disp) or {}
+  -- compass target (quest hand-in, travel leg...) drawn with the same picture the compass uses
+  local tp = frame.tgt
+  local T = ns.Path and ns.Path.Target and ns.Path.Target()
+  local tx, ty
+  if T and T.x and T.map and disp and hasPos and DB.trackTarget ~= false then
+    tx, ty = ToDisplay(T.map, T.x, T.y, disp)
+  end
+  if tx then
+    local col, glyph, pic = ns.Path.TargetLook()
+    col = col or { 1, .82, .2 }
+    if pic then
+      tp.tex:SetTexture(TEXDIR .. pic); tp.tex:SetVertexColor(col[1], col[2], col[3]); tp.tex:Show(); tp.txt:Hide()
+    else
+      tp.tex:Hide(); tp.txt:SetText(glyph or "!"); tp.txt:SetTextColor(col[1], col[2], col[3]); tp.txt:Show()
+    end
+    tp.info = { title = T.label or "Target", lines = { T.dist and (math.floor(T.dist) .. " yd") or "" } }
+    tp:ClearAllPoints()
+    tp:SetPoint("CENTER", frame.art, "TOPLEFT", tx * aw, -ty * ah)
+    tp:Show()
+    if sx then trails[#trails + 1] = { ax = sx * aw, ay = sy * ah, bx = tx * aw, by = ty * ah, c = col, max = 30 } end
+  else
+    tp:Hide()
+  end
+
+  -- where the party are heading (their shared compass goal): a marker on the map and footprints from their dot
+  local pm = 0
+  if DB.trackTarget ~= false and disp and hasPos and ns.Path and ns.Path.KindLook then
+    for i, p in ipairs(list) do
+      local g = (not p.self) and p.x and (now - p.t) <= STALE and GoalOf(p.name)
+      if g and g.map and g.map ~= 0 and pm < MAXPM then
+        local gx, gy = ToDisplay(g.map, g.x, g.y, disp)
+        if gx then
+          pm = pm + 1
+          local m = PeerMark(pm)
+          local kc, glyph, pic = ns.Path.KindLook(g.kind, g.pic)
+          kc = kc or { 1, .82, .2 }
+          local pc = ClassColor(p.class, COLORS[(i - 1) % #COLORS + 1])
+          m.ring:SetVertexColor(pc[1], pc[2], pc[3])
+          if pic then
+            m.tex:SetTexture(TEXDIR .. pic); m.tex:SetVertexColor(kc[1], kc[2], kc[3]); m.tex:Show(); m.txt:Hide()
+          else
+            m.tex:Hide(); m.txt:SetText(glyph or "!"); m.txt:SetTextColor(kc[1], kc[2], kc[3]); m.txt:Show()
+          end
+          m.info = { title = p.name .. " is heading here",
+                     lines = { ns.Path.GoalText and ns.Path.GoalText(g.kind, g.pic, g.label) or "" } }
+          m:ClearAllPoints()
+          m:SetPoint("CENTER", frame.art, "TOPLEFT", gx * aw, -gy * ah)
+          m:Show()
+          local px, py = ToDisplay(p.map, p.x, p.y, disp)
+          if px then trails[#trails + 1] = { ax = px * aw, ay = py * ah, bx = gx * aw, by = gy * ah, c = pc, max = 12 } end
+        end
+      end
+    end
+  end
+  for i = pm + 1, #pmarks do pmarks[i]:Hide(); pmarks[i].info = false end
+
+  -- points of interest: dungeon entrances (coloured by how well they fit you and your group) and farming spots ($)
+  local poi = {}
+  local function add(e) if #poi < MAXPINS then poi[#poi + 1] = e end end
+  if DB.trackPins ~= false and disp and hasPos then
+    local cont = DB.trackView == "continent"
+    local function place(map, x, y)
+      if map == disp then return x, y end
+      if cont then return ToDisplay(map, x, y, disp) end      -- zone view only shows this zone's own points
+    end
+    local Dg = ns.Path and ns.Path.Dungeons
+    if Dg and ns.Dungeons then
+      local _, lowLvl = Dg.Group()
+      for _, d in ipairs(ns.Dungeons) do
+        local px, py = place(d[2], d[3], d[4])
+        if px then
+          local fit = Dg.Fit(d, lowLvl)
+          add({ kind = "dungeon", x = px, y = py, c = FITCOL[fit], title = d[1],
+                label = ("%s %d-%d"):format(d[1], d[5], d[6]),
+                lines = { ("Levels %d-%d, %d players"):format(d[5], d[6], d[8]),
+                          (Dg.FitText[fit] or "") .. " (lowest level in your group: " .. lowLvl .. ")" } })
+        end
+      end
+    end
+    if #poi == 0 then          -- no table entry for this map: use the client's own entrance list when it has one
+      for _, e in ipairs(Entrances(disp)) do
+        if e.position then
+          local px, py = e.position:GetXY()
+          add({ kind = "dungeon", x = px, y = py, c = FITCOL.ok, title = e.name or "Dungeon entrance", label = e.name,
+                lines = { e.description } })
+        end
+      end
+    end
+    if ns.Path and ns.Path.FarmSpots then
+      local now2, lvl = GetTime(), UnitLevel("player")
+      if not farmCache or now2 - farmCache.t > 2 or farmCache.lvl ~= lvl then
+        local ok, r, fmap = pcall(ns.Path.FarmSpots, 6)
+        farmCache = { t = now2, lvl = lvl, r = ok and r or {}, map = ok and fmap or nil }
+      end
+      if farmCache.map then
+        for _, e in ipairs(farmCache.r) do
+          local s = e.s
+          local px, py = place(farmCache.map, s[1], s[2])
+          if px then
+            add({ kind = "farm", x = px, y = py, c = FITCOL.farm, title = s[7],
+                  label = ("%s %d-%d"):format(s[7], s[4], s[5]),
+                  lines = { ("Farming spot, level %d-%d"):format(s[4], s[5]),
+                            ("about %d mobs%s"):format(s[3], s[6] >= .5 and ", mostly humanoids (cloth and coin)" or "") } })
+          end
+        end
+      end
+    end
+  end
   for i = 1, MAXPINS do
-    local e = ents[i]
+    local e = poi[i]
     local pin = pins[i]
-    if e and e.position then
+    if e then
       if not pin then
         pin = CreateFrame("Button", nil, frame.dots)
         pin:SetSize(10, 10)
         pin.tex = pin:CreateTexture(nil, "ARTWORK")
         pin.tex:SetAllPoints()
-        pin.tex:SetColorTexture(.75, .45, 1, 1)
+        pin.s = pin:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        pin.s:SetPoint("CENTER"); pin.s:SetText("$")
+        local okf, fs = pcall(pin.CreateFontString, pin, nil, "OVERLAY", "GameFontHighlightSmallOutline")
+        if not okf or not fs then fs = pin:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall") end
+        pin.lbl = fs
+        pin.lbl:SetPoint("TOP", pin, "BOTTOM", 0, 1)
         pin.info = false
         pin:SetScript("OnEnter", function(self)
           if not (self.info and GameTooltip) then return end
           GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-          GameTooltip:AddLine(self.info.name or "Dungeon entrance")
-          if self.info.description then GameTooltip:AddLine(self.info.description, .8, .8, .8, true) end
+          GameTooltip:AddLine(self.info.title or "Point of interest")
+          for _, l in ipairs(self.info.lines or {}) do GameTooltip:AddLine(l, .8, .8, .8, true) end
           GameTooltip:Show()
         end)
         pin:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
         pins[i] = pin
       end
-      local px, py = e.position:GetXY()
+      local c = e.c or FITCOL.ok
+      if e.kind == "farm" then
+        pin.tex:Hide(); pin.s:SetTextColor(c[1], c[2], c[3]); pin.s:Show()
+      else
+        pin.tex:Show(); pin.tex:SetColorTexture(c[1], c[2], c[3], 1); pin.s:Hide()
+      end
+      pin.lbl:SetText(e.label or "")
+      pin.lbl:SetTextColor(c[1], c[2], c[3])
+      pin.lbl:SetShown(DB.trackLabels ~= false)
       pin.info = e
       pin:ClearAllPoints()
-      pin:SetPoint("CENTER", frame.art, "TOPLEFT", px * aw, -py * ah)
+      pin:SetPoint("CENTER", frame.art, "TOPLEFT", e.x * aw, -e.y * ah)
       pin:Show()
     elseif pin then
       pin:Hide(); pin.info = false
+    end
+  end
+
+  -- gathering node pins (learned from your own gathering; per-kind toggles)
+  local nodes = (disp and hasPos and ns.Gather) and ns.Gather.Visible(disp) or {}
+  for i = 1, MAXNODES do
+    local nd = nodes[i]
+    local np = nodePins[i]
+    if nd then
+      if not np then
+        np = CreateFrame("Button", nil, frame.dots)
+        np:SetSize(8, 8)
+        np.tex = np:CreateTexture(nil, "ARTWORK")
+        np.tex:SetAllPoints()
+        np.info = false
+        np:SetScript("OnEnter", function(self)
+          if not (self.info and GameTooltip) then return end
+          GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+          GameTooltip:AddLine(self.info.n or "Node")
+          GameTooltip:Show()
+        end)
+        np:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+        nodePins[i] = np
+      end
+      local c = ns.Gather.Color(nd.k)
+      np.tex:SetColorTexture(c[1], c[2], c[3], 1)
+      np.info = nd
+      np:ClearAllPoints()
+      np:SetPoint("CENTER", frame.art, "TOPLEFT", nd.x * aw, -nd.y * ah)
+      np:Show()
+    elseif np then
+      np:Hide(); np.info = false
     end
   end
 end
@@ -489,6 +902,32 @@ end
 -- ---------- public API ----------
 ns.Tracker = {}
 function ns.Tracker.Peers() return peers end
+function ns.Tracker.Goals() return goals end
+function ns.Tracker.Feet() local n = 0; for _, t in ipairs(feet) do if t.shown then n = n + 1 end end return n end
+
+-- ---------- sharing gathering nodes ----------
+-- N:kind:map:x:y:name  sent once when I find a NEW node; the receiver's Gather.Record ignores a spot it already has
+function ns.Tracker.ShareNode(kind, name, map, x, y)
+  if not (DB and DB.track and DB.trackShareNodes ~= false) then return end
+  local ch = GroupChannel()
+  if not ch then return end
+  name = (tostring(name or "?"):gsub("[:|%c]", " ")):sub(1, 40)
+  pcall(Send, PREFIX, ("N:%s:%d:%.4f:%.4f:%s"):format(kind, map, x, y, name), ch)
+end
+
+function ns.Tracker.ToggleShareNodes(on)
+  if on == nil then on = (DB.trackShareNodes == false) end
+  DB.trackShareNodes = on
+  ns.Print("Sharing and receiving gathering nodes with the party: " .. (on and "|cff00ff00ON|r" or "|cffff4040OFF|r"))
+end
+
+-- /realm share: whether my compass goal (quest giver, trainer, tram...) is told to the party along with my position
+function ns.Tracker.ToggleShareGoal(on)
+  if on == nil then on = (DB.trackShareGoal == false) end
+  DB.trackShareGoal = on
+  ns.Print("Sharing where your compass is heading with the party: " .. (on and "|cff00ff00ON|r" or "|cffff4040OFF|r"))
+  if DB.track then SendGoal(true) end
+end
 function ns.Tracker.Show(show)
   if show == nil then show = not frame:IsShown() end
   DB.trackShown = show
@@ -501,7 +940,7 @@ function ns.Tracker.SetTrack(on)
   DB.track = on
   if on then
     ns.Print("Sharing your location with your group. |cff00ff00ON|r")
-    Broadcast()
+    Broadcast(); SendGoal(true)
   else
     SendOff()
     ns.Print("Location sharing |cffff4040OFF|r")
@@ -522,6 +961,12 @@ function ns.Tracker.ToggleView()
   ns.Print("Tracker view: " .. (DB.trackView == "continent" and "continent" or "zone"))
 end
 
+function ns.Tracker.ToggleDiscovered()
+  DB.trackDiscovered = (DB.trackDiscovered == false)
+  Relayout()
+  ns.Print("Fully discovered map: " .. (DB.trackDiscovered and "on" or "off (shows only what you explored)"))
+end
+
 function ns.Tracker.ToggleNames()
   DB.trackNames = (DB.trackNames == false)
   ns.Print("Names on the map: " .. (DB.trackNames and "on" or "off"))
@@ -529,7 +974,12 @@ end
 
 function ns.Tracker.TogglePins()
   DB.trackPins = (DB.trackPins == false)
-  ns.Print("Dungeon entrance pins: " .. (DB.trackPins and "on" or "off"))
+  ns.Print("Points of interest (dungeon entrances and farming spots): " .. (DB.trackPins and "on" or "off"))
+end
+
+function ns.Tracker.ToggleLabels()
+  DB.trackLabels = (DB.trackLabels == false)
+  ns.Print("Labels on points of interest: " .. (DB.trackLabels and "on" or "off"))
 end
 
 function ns.Tracker.Where()
@@ -563,6 +1013,9 @@ ev:SetScript("OnEvent", function(_, event, a1, a2, _, sender)
     DB.track = DB.track or false
     DB.trackView = DB.trackView or "zone"
     if DB.trackPins == nil then DB.trackPins = true end
+    if DB.trackLabels == nil then DB.trackLabels = true end
+    if DB.trackDiscovered == nil then DB.trackDiscovered = true end
+    if DB.trackShareGoal == nil then DB.trackShareGoal = true end
     RegisterPrefix()
     frame = Build()
     if DB.trackPos then
@@ -579,8 +1032,9 @@ ev:SetScript("OnEvent", function(_, event, a1, a2, _, sender)
       acc, bcast = acc + dt, bcast + dt
       if bcast >= 1 then
         bcast = 0
-        if DB.track then Broadcast() end
+        if DB.track then Broadcast(); SendGoal(false) end
       end
+      DrawTrails(dt)
       if acc < 0.2 then return end
       acc = 0
       Refresh()
@@ -589,7 +1043,26 @@ ev:SetScript("OnEvent", function(_, event, a1, a2, _, sender)
     if a1 ~= PREFIX or not sender then return end
     local name = Ambiguate and Ambiguate(sender, "short") or sender
     if name == UnitName("player") then return end
-    if a2 == "OFF" then peers[name] = nil return end
+    if a2 == "OFF" then peers[name] = nil; goals[name] = nil return end
+    if a2:sub(1, 2) == "N:" then
+      -- a party member found a node: keep it unless that spot is already recorded
+      local kind, nmap, nx, ny, nname = a2:match("^N:(%a+):(%d+):([%d%.]+):([%d%.]+):?(.*)$")
+      nmap, nx, ny = tonumber(nmap), tonumber(nx), tonumber(ny)
+      if kind and nx and ny and nmap and nmap > 0 and nx >= 0 and nx <= 1 and ny >= 0 and ny <= 1
+         and DB.trackShareNodes ~= false and ns.Gather and ns.Gather.IsKind(kind) then
+        ns.Gather.Record(kind, nname ~= "" and nname or "?", nmap, nx, ny, name)
+      end
+      return
+    end
+    if a2:sub(1, 2) == "G:" then
+      if a2 == "G:-" then goals[name] = nil return end
+      local kind, gmap, gx, gy, pic, label = a2:match("^G:(%w+):(%d+):([%d%.]+):([%d%.]+):([%w%-]+):?(.*)$")
+      if kind then
+        goals[name] = { kind = kind, map = tonumber(gmap), x = tonumber(gx), y = tonumber(gy),
+                        pic = (pic ~= "-") and pic or nil, label = label, t = GetTime() }
+      end
+      return
+    end
     local map, x, y, cls = a2:match("^P:(%d+):([%d%.]+):([%d%.]+):?(%u*)$")
     if map then
       peers[name] = { map = tonumber(map), x = tonumber(x), y = tonumber(y), class = cls, t = GetTime() }
@@ -600,8 +1073,8 @@ ev:SetScript("OnEvent", function(_, event, a1, a2, _, sender)
   elseif event == "GROUP_ROSTER_UPDATE" then
     -- drop people who left the group
     for name in pairs(peers) do
-      if not (UnitInParty(name) or UnitInRaid(name)) then peers[name] = nil end
+      if not (UnitInParty(name) or UnitInRaid(name)) then peers[name] = nil; goals[name] = nil end
     end
-    if DB and DB.track then Broadcast() end
+    if DB and DB.track then Broadcast(); SendGoal(true) end
   end
 end)
