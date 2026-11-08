@@ -14,6 +14,9 @@ local DEFAULTS = { exAuto = true, exGear = false, exDock = true, exMinDisc = 0.1
                    exMinProfit = 1000, exMinSamples = 8, exMinZ = 2 }
 local DB, store, demoStore, live
 local settings, ahButton
+local rolledOut                      -- opened from the AH tab; closes with the AH
+local slide = { off = 0, p = 0, dir = 0 }
+local TAB_GAP, SLIDE_PX, SLIDE_SECS = 26, 60, 0.2
 local frame, rows = nil, {}
 local scan = nil                 -- active scan state
 local lastScan = 0
@@ -338,7 +341,7 @@ local function Dock()
   local target = AHTarget()
   if DB and DB.exDock and frame and target then
     frame:ClearAllPoints()
-    frame:SetPoint("TOPLEFT", target, "TOPRIGHT", 6, 0)
+    frame:SetPoint("TOPLEFT", target, "TOPRIGHT", TAB_GAP - slide.off, 0)
   end
 end
 
@@ -346,6 +349,7 @@ local function Build()
   local f = CreateFrame("Frame", "RealmExchange", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
   f:SetSize(450, 60 + ROWS * 20 + 34)
   f:SetPoint("CENTER", 200, 0)
+  f:SetFrameStrata("HIGH"); f:SetToplevel(true)   -- above the travel compass (MEDIUM); a click raises it over other Realm windows
   f:SetClampedToScreen(true)
   f:SetMovable(true); f:EnableMouse(true)
   f:RegisterForDrag("LeftButton")
@@ -615,10 +619,41 @@ end
 
 -- Button on the auction house window + docking
 local hooked = {}
+
+local function UpdateTab()
+  if ahButton then ahButton:SetText((frame and frame:IsShown()) and "<" or ">") end
+end
+
+-- Roll the Exchange out from (or back into) the auction house's right edge.
+local function Roll(out)
+  if not frame then return end
+  if out then
+    if not frame:IsShown() then
+      slide.p, slide.off = 0, SLIDE_PX
+      frame:SetAlpha(0); frame:Show(); Compute(); ns.Exchange.Refresh()
+    end
+    slide.dir = 1; rolledOut = true
+  else
+    slide.dir = -1
+  end
+  Dock(); UpdateTab()
+end
+
+function ns.Exchange.CloseWithAH()
+  slide.dir, slide.p, slide.off = 0, 0, 0
+  if frame then
+    frame:SetAlpha(1)
+    if rolledOut and frame:IsShown() then frame:Hide() end
+  end
+  rolledOut = false
+  UpdateTab()
+end
+
 local function HookTarget(t)
   if t and not hooked[t] then
     hooked[t] = true
     pcall(function() t:HookScript("OnShow", function() C_Timer.After(0, Dock) end) end)
+    pcall(function() t:HookScript("OnHide", function() ns.Exchange.CloseWithAH() end) end)
   end
 end
 
@@ -628,16 +663,29 @@ local function AttachAHButton()
   if not target then return end
   if not ahButton then
     ahButton = CreateFrame("Button", "RealmExchangeAHButton", target, "UIPanelButtonTemplate")
-    ahButton:SetSize(84, 20); ahButton:SetText("Exchange")
+    ahButton:SetSize(110, 22); ahButton:SetText(">")
     ahButton:SetScript("OnClick", function()
-      if frame:IsShown() then frame:Hide()
-      else frame:Show(); Compute(); ns.Exchange.Refresh() end
+      Roll(not (frame:IsShown() and slide.dir >= 0))
+    end)
+    ahButton:SetScript("OnEnter", function(self)
+      if not GameTooltip then return end
+      GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+      GameTooltip:SetText("Realm Exchange")
+      GameTooltip:AddLine("Click to roll out or tuck away.", 1, 1, 1)
+      GameTooltip:Show()
+    end)
+    ahButton:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+    pcall(function()
+      frame:HookScript("OnShow", UpdateTab)
+      frame:HookScript("OnHide", UpdateTab)
     end)
   end
   if ahButton:GetParent() ~= target then ahButton:SetParent(target) end
   ahButton:ClearAllPoints()
-  ahButton:SetPoint("TOPRIGHT", target, "TOPRIGHT", -40, -4)
+  ahButton:SetPoint("BOTTOMRIGHT", target, "BOTTOMRIGHT", -8, 5)
+  ahButton:SetFrameLevel((target:GetFrameLevel() or 1) + 20)
   ahButton:Show()
+  UpdateTab()
 end
 
 -- ---------- demo ----------
@@ -684,6 +732,7 @@ function ns.Exchange.Command(arg)
   elseif cmd == "auto" then
     DB.exAuto = not DB.exAuto
     Print("Auto-scan on opening the AH: " .. (DB.exAuto and "on" or "off"))
+
   elseif cmd == "gear" then
     DB.exGear = not DB.exGear
     Print("Track weapons/armor: " .. (DB.exGear and "on (noisy)" or "off"))
@@ -723,7 +772,7 @@ end
 -- ---------- events ----------
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("PLAYER_LOGIN")
-for _, e in ipairs({ "AUCTION_HOUSE_SHOW", "REPLICATE_ITEM_LIST_UPDATE", "AUCTION_ITEM_LIST_UPDATE" }) do
+for _, e in ipairs({ "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "REPLICATE_ITEM_LIST_UPDATE", "AUCTION_ITEM_LIST_UPDATE" }) do
   pcall(ev.RegisterEvent, ev, e)
 end
 ev:SetScript("OnEvent", function(_, event)
@@ -748,6 +797,8 @@ ev:SetScript("OnEvent", function(_, event)
       C_Timer.After(delay, function() AttachAHButton(); Dock() end)
     end
     if DB.exAuto and time() - lastScan > 900 then StartScan() end
+  elseif event == "AUCTION_HOUSE_CLOSED" then
+    ns.Exchange.CloseWithAH()
   elseif event == "REPLICATE_ITEM_LIST_UPDATE" then
     OnReplicate()
   elseif event == "AUCTION_ITEM_LIST_UPDATE" then
@@ -756,7 +807,17 @@ ev:SetScript("OnEvent", function(_, event)
 end)
 
 local driver = CreateFrame("Frame")
-driver:SetScript("OnUpdate", function() if scan and scan.get then ProcessChunk() end end)
+driver:SetScript("OnUpdate", function(_, el)
+  if scan and scan.get then ProcessChunk() end
+  if slide.dir ~= 0 and frame then
+    slide.p = slide.p + slide.dir * (el or 0.02) / SLIDE_SECS
+    if slide.p >= 1 then slide.p, slide.dir = 1, 0
+    elseif slide.p <= 0 then slide.p, slide.dir = 0, 0; frame:Hide(); rolledOut = false end
+    slide.off = SLIDE_PX * (1 - slide.p)
+    frame:SetAlpha(slide.dir == 0 and slide.p == 0 and 1 or slide.p)
+    Dock()
+  end
+end)
 
 -- test hooks
 ns.Exchange._Record, ns.Exchange._Compute, ns.Exchange._Analyze = Record, Compute, Analyze

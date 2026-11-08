@@ -22,7 +22,7 @@ ns.Inns = {
   { "Refuge Pointe",     1417, .458, .472, "A" },
   { "Southshore",        1424, .508, .573, "A" },
   { "Astranaar",         1440, .366, .497, "A" },
-  { "Dolanaar",          1438, .559, .593, "A" },
+  { "Dolanaar",          1438, .556, .598, "A" },
   { "Auberdine",         1439, .371, .438, "A" },
   { "Stormwind City",    1453, .607, .752, "A" },
   { "Ironforge",         1455, .181, .517, "A" },
@@ -565,7 +565,21 @@ local function Offer(k, a, fallback)
   if not Ask(a) then Path.Print(fallback) end
 end
 
+-- inn mode is only for getting to an inn to set home: once that inn is home, resume the previous mode or the quest route.
+-- Runs from the timer too, because the bind event does not fire after a /reload and the mode is saved.
+local function LeaveInnIfHome()
+  local O = Path.Opts and Path.Opts()
+  if not (O and O.trackMode == "inn") then return end
+  local t = I.Target()
+  if not (t and t.sub == "Your home") then return end
+  O.trackMode = prevMode or "quest"; prevMode = nil
+  if Path.ResetTrack then Path.ResetTrack() end
+  if Path.UpdateHUD then Path.UpdateHUD() end
+end
+I.LeaveInnIfHome = LeaveInnIfHome
+
 local function Tick()
+  pcall(LeaveInnIfHome)
   local O = Path.Opts and Path.Opts()
   if not O or O.innTips == false then return end
   local a = I.HomeAdvice()
@@ -606,7 +620,9 @@ ev:SetScript("OnEvent", function()
     local _, name = I.Bound()
     if name then Path.Print("home is now " .. name .. ". The hearthstone goes there.") end
   end
-  if O and O.trackMode == "inn" and prevMode then O.trackMode = prevMode; prevMode = nil end
+  -- home is set: leave inn mode and go back to where the player was, or the quest route
+  if O and O.trackMode == "inn" then O.trackMode = prevMode or "quest"; prevMode = nil end
+  if Path.UpdateHUD then Path.UpdateHUD() end
   if Path.ResetTrack then Path.ResetTrack() end
 end)
 ev:SetScript("OnUpdate", function(_, dt)
@@ -650,6 +666,7 @@ function Path.SlashExtra(cmd, rest)
     else
       Path.Print(("%s is the inn for %s, but moving your home there would not save much (or there are too few quests left in the zone)."):format(a.inn[1], Zone(a.map)))
     end
+    if a and a.reason == "home" then return true end
     O.trackMode = "inn"
     if Path.ResetTrack then Path.ResetTrack() end
     if Path.UpdateHUD then Path.UpdateHUD() end

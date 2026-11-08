@@ -153,9 +153,13 @@ function Gear.Score(link, spec)
   if not stats then return 0, false end
   local w = spec.weights
   local total, hasData = 0, false
+  local armorCredit = 0
   for k, v in pairs(stats) do
     local wt = w[k]
-    if k == ARMOR_KEY and wt == nil then wt = .05 end
+    if k == ARMOR_KEY and wt == nil then
+      armorCredit = (type(v) == "number") and v * .05 or 0
+      wt = nil
+    end
     if wt and type(v) == "number" then
       total = total + v * wt
       if wt > 0 and k ~= ARMOR_KEY then hasData = true end
@@ -165,7 +169,10 @@ function Gear.Score(link, spec)
     local wt = w[k]
     if wt then total = total + v * wt; if wt > 0 then hasData = true end end
   end
-  total = total + ItemLevel(link) * .3
+  -- filler credit (armor, item level) only decides between plain items; real stats outweigh it
+  local filler = armorCredit + ItemLevel(link) * .3
+  if hasData then filler = filler * .2 end
+  total = total + filler
   return total, hasData
 end
 
@@ -241,12 +248,12 @@ function Gear.Scan(quiet)
   if not class or not spec then Gear.upgrades = {}; return end
 
   -- what you wear right now
-  local worn, wornScore = {}, {}
+  local worn, wornScore, wornHas = {}, {}, {}
   for slot = 1, 19 do
     local link = Equipped(slot)
     if link then
       worn[slot] = link
-      wornScore[slot] = Gear.Score(link, spec)
+      wornScore[slot], wornHas[slot] = Gear.Score(link, spec)
     else
       wornScore[slot] = 0
     end
@@ -294,6 +301,8 @@ function Gear.Scan(quiet)
     elseif twoHand and not it.is2h and (target == 17) then
       effective = -1 -- an off-hand cannot go with a two-hander
     end
+    -- a plain item (no weighted stats) never replaces a worn item that has them
+    if not combo and worn[target] and wornHas[target] and not it.has then effective = -1 end
     if worn[target] ~= it.link and effective > 0 then
       local pct
       if base <= 0 then pct = 100 else pct = (effective - base) / base * 100 end

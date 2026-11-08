@@ -395,6 +395,7 @@ local function Build()
   local sz = DB.trackSize
   f:SetSize(sz and sz[1] or 230, sz and sz[2] or 340)
   f:SetPoint("CENTER")
+  f:SetFrameStrata("HIGH"); f:SetToplevel(true)
   f:SetResizable(true)
   pcall(function()
     if f.SetResizeBounds then f:SetResizeBounds(200, 220, 900, 900)

@@ -61,7 +61,7 @@ local function ObjectiveFor(objs, name)
   local prefix
   for _, o in ipairs(objs) do
     if o.text and not Secret(o.text) then
-      local head = o.text:lower():match("^(.-)%s*:%s*%d+%s*/%s*%d+") or o.text:lower()
+      local head = o.text:lower():match("^(.-)%s*:%s*%d+%s*/%s*%d+") or o.text:lower():gsub("^%d+%s*/%s*%d+%s+", "")
       head = head:gsub("%s+slain$", ""):gsub("%s+killed$", "")
       if head == lname then return o end
       if not prefix and head:sub(1, #lname) == lname and not head:sub(#lname + 1, #lname + 1):match("%w") then prefix = o end
@@ -251,6 +251,43 @@ local function Done(s, i, lvl)
   return false
 end
 
+-- An accept that sits straight after a hand-in at the same NPC is that hand-in's follow-up: the giver offers it
+-- only once the earlier quest is handed in, so it stays closed until then.
+local function SameSpot(a, b)
+  return a.m == b.m and a.npc == b.npc and a.p and b.p and a.p[1] == b.p[1] and a.p[2] == b.p[2]
+end
+local function Gated(s, i)
+  for j = i - 1, 1, -1 do
+    local p = steps[j]
+    if not SameSpot(p, s) then return false end
+    if p.t == "T" and p.q ~= s.q and not Completed(p.q) then return true end
+  end
+  return false
+end
+
+-- Real prerequisites (Questie data, Path\Prereqs.lua): "s" = any one of these must be handed in, "g" = all of them.
+-- true / false when the quest is in the table, nil when it is not (then the same-spot rule above is the fallback).
+function Path.PrereqMet(q)
+  local row = ns.PathPre and ns.PathPre[q]
+  if not row then return nil end
+  if row.g then for _, p in ipairs(row.g) do if not Completed(p) then return false end end end
+  if row.s then
+    local any
+    for _, p in ipairs(row.s) do if Completed(p) then any = true break end end
+    if not any then return false end
+  end
+  return true
+end
+-- a quest giver that has listed the quest itself always wins over the table
+function Path.Offered(q, flag)
+  if not (S and q) then return end
+  local v = flag and true or nil
+  if (S.offered and S.offered[q]) == v then return end
+  S.offered = S.offered or {}
+  S.offered[q] = v
+  if Path.Changed then Path.Changed(true) end
+end
+
 -- "ok", "skip", or "redirect" plus the index to redirect to
 local function Availability(s, i, lvl)
   local t = s.t
@@ -259,13 +296,26 @@ local function Availability(s, i, lvl)
   local over = c and c.exit and c.exit > 0 and lvl >= c.exit
   if t == "A" then
     if InLog(s.q) then return "ok" end
+    -- the quest giver showed no such quest (its earlier quest is not handed in yet): move on until something changes
+    if S and S.noOffer and S.noOffer[s.q] then return "skip" end
+    -- the quest's real prerequisites decide; only a quest missing from the table falls back to the same-spot guess
+    if not (S and S.offered and S.offered[s.q]) then
+      local met = Path.PrereqMet(s.q)
+      if met == false then return "skip" end
+      if met == nil and Gated(s, i) then return "skip" end
+    end
     if s.rl and lvl < s.rl then return "skip" end
     if over then return "skip" end
     if s.ql and lvl - s.ql >= 8 then return "skip" end
     return "ok"
   elseif t == "D" or t == "T" then
     if Completed(s.q) then return "ok" end
-    if InLog(s.q) then return "ok" end
+    if InLog(s.q) then
+      -- a hand-in is only open once the game says the quest is ready; otherwise the "nearest step wins" rule
+      -- can send you to the NPC with the items still missing
+      if t == "T" and CQ and (CQ.ReadyForTurnIn or CQ.IsComplete) and not Ready(s.q) then return "skip" end
+      return "ok"
+    end
     local a = aStep[s.q]
     if a and not S.skip[a] then
       local av = Availability(steps[a], a, lvl)
@@ -336,12 +386,41 @@ local function Faction()
   return f == "Horde" and "H" or "A"
 end
 
+-- Total spells in the spellbook, or nil when this client offers no way to count them.
+local function BookCount()
+  if not GetNumSpellTabs or not GetSpellTabInfo then return nil end
+  local ok, n = pcall(function()
+    local total = 0
+    for i = 1, GetNumSpellTabs() do
+      local _, _, _, num = GetSpellTabInfo(i)
+      total = total + (num or 0)
+    end
+    return total
+  end)
+  if ok and type(n) == "number" and n > 0 then return n end
+  return nil
+end
+
+-- Remember how many spells you had when this tier began, so a later jump means you already trained.
+function Path.MarkTierStart()
+  if not S then return end
+  local tier = Tier(Path.Level())
+  local n = BookCount()
+  if n and tier >= 4 and S.bookTier ~= tier then S.bookTier, S.bookN = tier, n end
+end
+
 local trainerCache = { tier = -1 }
 function Path.TrainerStop()
   if not O or O.trainers == false or not S then return nil end
   local lvl = Path.Level()
   local tier = Tier(lvl)
   if tier < 4 or tier <= (S.trainedAt or 0) or tier <= (S.trainSkip or 0) then return nil end
+  -- Already bought this tier's spells? Then the spellbook has grown since the tier began.
+  local n = BookCount()
+  if S.bookTier == tier and n and S.bookN and n > S.bookN then S.trainedAt = tier return nil end
+  -- Between spell levels with no record of when this tier began: we cannot tell whether you trained,
+  -- so wait for the next spell level instead of sending you to a trainer for nothing.
+  if lvl > tier and S.bookTier ~= tier then return nil end
   local _, class = UnitClass("player")
   local list = ns.Trainers and class and ns.Trainers[class]
   if not list then return nil end
@@ -391,6 +470,15 @@ function Path.Skip()
   local trainer = Path.TrainerStop()
   if trainer then S.trainSkip = Tier(Path.Level()); Path.Changed(true) return end
   if cur then S.skip[cur] = true; Path.Changed(true) end
+end
+-- mark an accept step as not offered by its quest giver (flag true) or offered again (flag false)
+function Path.NoOffer(q, flag)
+  if not (S and q) then return end
+  local v = flag and true or nil
+  if (S.noOffer and S.noOffer[q]) == v then return end
+  S.noOffer = S.noOffer or {}
+  S.noOffer[q] = v
+  Path.Changed(true)
 end
 function Path.Back()
   local last
@@ -485,17 +573,26 @@ ev:SetScript("OnEvent", function(_, e, a1)
     S = RealmDB.pathChars[key]
     S.skip = S.skip or {}
     Path.Load()
-    C_Timer.After(1.5, function() Path.Changed(true) end)
+    C_Timer.After(1.5, function()
+      -- on a spell level with no record yet, start counting now
+      if Path.Level() == Tier(Path.Level()) then Path.MarkTierStart() end
+      Path.Changed(true)
+    end)
     return
   end
   if not O then return end
   if e == "TRAINER_SHOW" then
     S.trainedAt = Tier(Path.Level())
+    S.bookTier, S.bookN = nil, nil
     Path.Changed(true)
     return
   end
+  -- a hand-in or a new level is when an earlier quest's follow-up can appear, so ask the quest givers again
+  if e == "QUEST_TURNED_IN" or e == "PLAYER_LEVEL_UP" then S.noOffer = nil end
   if e == "PLAYER_LEVEL_UP" then
     local lvl = tonumber(a1) or Path.Level()
+    -- note the spell count a few seconds after the level-up, once any free spells have landed
+    C_Timer.After(3, function() if O then Path.MarkTierStart() end end)
     if O.levelTips then
       ChapterTip(lvl)
       if Tier(lvl) == lvl and lvl >= 4 then Print("Level " .. lvl .. ": your trainer has new spells. The compass will point you at one.") end

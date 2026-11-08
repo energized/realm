@@ -147,7 +147,23 @@ local function Build()
   panel.dist:SetPoint("TOPRIGHT", panel.big, "BOTTOMRIGHT", 0, -2); panel.dist:SetJustifyH("RIGHT"); Font(panel.dist, 16)
   panel.tx = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   panel.tx:SetPoint("TOPLEFT", panel.sub, "BOTTOMLEFT", 0, -3); panel.tx:SetJustifyH("LEFT"); Font(panel.tx, 11, "")
+  -- big at-a-glance readout for profession skill levels (leveling detours)
+  panel.skill = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+  panel.skill:SetPoint("TOPLEFT", panel.sub, "BOTTOMLEFT", 0, -5); panel.skill:SetJustifyH("LEFT"); Font(panel.skill, 24)
+  if panel.skill.SetWordWrap then panel.skill:SetWordWrap(true) end
   if panel.tx.SetWordWrap then panel.tx:SetWordWrap(true) end
+  if panel.tx.SetMaxLines then panel.tx:SetMaxLines(1) end        -- one line by default; click it for the full detail
+  panel.txBtn = CreateFrame("Button", nil, panel)                  -- invisible hit area over the description
+  panel.txBtn:SetFrameLevel(panel:GetFrameLevel() + 1)
+  panel.txBtn:SetScript("OnClick", function()
+    panel.txOpen = not panel.txOpen
+    Path.UpdatePanel()
+  end)
+  panel.txBtn:SetScript("OnEnter", function(self)
+    if GameTooltip then GameTooltip:SetOwner(self, "ANCHOR_TOP"); GameTooltip:AddLine("Click to show or hide the full detail"); GameTooltip:Show() end
+  end)
+  panel.txBtn:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+  panel.txBtn:Hide()
   panel.next = {}
   for i = 1, 3 do
     local f = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
@@ -685,9 +701,9 @@ local function UpdatePanel()
   local route, steps, chapters = Path.Route()
   local W = PanelWidth()
   panel:SetWidth(W)
-  panel.title:SetWidth(W - 150); panel.sub:SetWidth(W - 150); panel.tx:SetWidth(W - 30)
+  panel.title:SetWidth(W - 150); panel.sub:SetWidth(W - 150); panel.tx:SetWidth(W - 30); panel.skill:SetWidth(W - 30)
   panel.big:SetText(""); panel.dist:SetText(""); panel.verb:SetText("")
-  panel.tx:SetText(""); panel.sub:SetText("")
+  panel.tx:SetText(""); panel.sub:SetText(""); panel.skill:SetText("")
   local s, i = Path.Current()
   local d = target.dist
   local near = d and d < 40
@@ -723,7 +739,17 @@ local function UpdatePanel()
     panel.title:SetText(UI.H.cream .. name .. "|r")
     panel.sub:SetText(UI.H.muted .. subt .. "|r")
     panel.accent:SetColorTexture(c[1], c[2], c[3], 1)
-    if (s.t == "G" or s.t == "L" or s.t == "R") and (not O.compact or s.virtual) then panel.tx:SetText(UI.H.muted .. (s.tx or "") .. "|r") end
+    if s.detour and s.skills then
+      panel.title:SetText(s.skills)                         -- profession skill levels ARE the headline: big, colored, one row
+    elseif (s.t == "G" or s.t == "L" or s.t == "R") and (not O.compact or s.virtual) then
+      local txt = s.tx or ""
+      if panel.txKey ~= s then panel.txKey = s; panel.txOpen = false end   -- a new step starts folded
+      local long = #txt > math.floor((W - 30) / 5.6)
+      local mark = long and (UI.H.gold .. (panel.txOpen and "  [-]|r" or "  [+]|r")) or ""
+      if panel.tx.SetMaxLines then panel.tx:SetMaxLines(panel.txOpen and 6 or 1) end
+      panel.tx:SetText(UI.H.muted .. txt .. "|r" .. mark)
+      panel.txLong = long
+    end
     if panel.big:GetText() == "" then
       panel.big:SetText(near and (UI.H.good .. "HERE|r") or (UI.H.cream .. dtxt .. "|r"))
     else
@@ -736,30 +762,39 @@ local function UpdatePanel()
     elseif s.t ~= "T" then bannered = false end
   end
 
-  local up = (steps and not override and not tr and not O.compact) and Path.Upcoming(3) or {}
-  local lastAnchor = (panel.tx:GetText() == "") and panel.sub or panel.tx
-  for k = 1, 3 do
-    local f = panel.next[k]
-    local e = up[k]
-    if e then
-      f:ClearAllPoints(); f:SetPoint("TOPLEFT", lastAnchor, "BOTTOMLEFT", 0, k == 1 and -6 or -1)
-      f:SetWidth(W - 20)
-      f:SetText(UI.H.muted .. "next  " .. Path.StepText(e[1]) .. "|r")
-      f:Show(); lastAnchor = f
-    else f:Hide() end
+  local skillShown = (panel.skill:GetText() or "") ~= ""
+  panel.tx:ClearAllPoints(); panel.tx:SetPoint("TOPLEFT", skillShown and panel.skill or panel.sub, "BOTTOMLEFT", 0, skillShown and -4 or -3)
+  if panel.txBtn then
+    if (panel.tx:GetText() or "") ~= "" and panel.txLong then
+      panel.txBtn:ClearAllPoints()
+      panel.txBtn:SetPoint("TOPLEFT", panel.tx, "TOPLEFT", 0, 0)
+      panel.txBtn:SetSize(W - 30, math.max(12, panel.tx:GetStringHeight() or 12))
+      panel.txBtn:Show()
+    else panel.txBtn:Hide() end
   end
-  panel.prog:ClearAllPoints(); panel.prog:SetPoint("TOPLEFT", lastAnchor, "BOTTOMLEFT", 0, -6)
-  if s and chapters and steps and not O.compact then
+  local up = (steps and not override and not tr and not O.compact and not (s and s.detour)) and Path.Upcoming(3) or {}
+  local lastAnchor = (panel.tx:GetText() == "") and (skillShown and panel.skill or panel.sub) or panel.tx
+  -- one "next" line (the Skip step list shows the rest)
+  for k = 1, 3 do panel.next[k]:Hide() end
+  if up[1] then
+    local f = panel.next[1]
+    f:ClearAllPoints(); f:SetPoint("TOPLEFT", lastAnchor, "BOTTOMLEFT", 0, -4)
+    f:SetWidth(W - 20)
+    f:SetText(UI.H.muted .. "next  |r" .. UI.H.text .. Path.StepText(up[1][1]) .. "|r" .. (#up > 1 and (UI.H.muted .. "  (+" .. (#up - 1) .. ")|r") or ""))
+    f:Show(); lastAnchor = f
+  end
+  -- chapter and level ride on the top label row instead of a row of their own
+  panel.prog:SetText("")
+  if s and chapters and steps and not O.compact and not override and not tr then
     local ch = chapters[s.ch]
-    local goal = ch and ch.exit and ch.exit > 0 and (" to " .. ch.exit) or ""
-    panel.prog:SetText(("%s%s   |   level %d%s|r"):format(UI.H.muted, ch and ch.name or "", Path.Level(), goal))
-  else
-    panel.prog:SetText("")
+    local goal = ch and ch.exit and ch.exit > 0 and ("/" .. ch.exit) or ""
+    panel.verb:SetText((panel.verb:GetText() or "") .. ("   %slvl %d%s|r"):format(UI.H.muted, Path.Level(), goal))
   end
   local h = 28 + (panel.title:GetStringHeight() or 22) + (panel.sub:GetStringHeight() or 12) + (panel.tx:GetStringHeight() or 0)
+  if skillShown then h = h + (panel.skill:GetStringHeight() or 24) + 5 end
   local n = 0
   for k = 1, 3 do if panel.next[k]:IsShown() then n = n + 1 end end
-  h = h + n * 13 + (n > 0 and 8 or 0) + (O.compact and 10 or 22)
+  h = h + n * 13 + (n > 0 and 6 or 0) + 10
   h = h + 24                                  -- the button row along the bottom
   -- keep room for the bottom button row and the distance line above it
   local minH = ((panel.dist:GetText() or "") ~= "" and 112) or (O.compact and 92 or 78)

@@ -2,7 +2,7 @@
 ## Title: |cffe8ab35Realm|r
 ## Notes: One addon for everything: a leveling route with a top-centre compass, quest automation and class trainer stops, auto-sell and repair, party tracker, Exchange auction scanner, death counter, and The Boys (gear upgrade popups, class guides, cooldown bar, professions). Replaces Wow Forever, Death Loop and TheBoys.
 ## Author: Jonathan
-## Version: 4.9.1
+## Version: 4.10.0
 ## SavedVariables: RealmDB, WowForeverDB, DeathLoopDB, TheBoysDB
 ## IconTexture: Interface\AddOns\Realm\icon
 ## Category: Miscellaneous
@@ -31,6 +31,8 @@ Boys\Classes\Warlock.lua
 Boys\Classes\Druid.lua
 Boys\Gear.lua
 Boys\Cooldowns.lua
+Boys\Buffs.lua
+Boys\Heals.lua
 Boys\Professions.lua
 Boys\MacroData.lua
 Boys\Macros.lua
@@ -62,4 +64,5 @@ Path\Route_Orc.lua
 Path\Route_Troll.lua
 Path\Route_Scourge.lua
 Path\Route_Tauren.lua
+Path\Prereqs.lua
 Setup.lua
