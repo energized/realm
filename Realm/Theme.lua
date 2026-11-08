@@ -18,6 +18,7 @@ UI.C = {
   good = rgb("4CC790"),
   blue = rgb("5B9BFF"),
   purple = rgb("A57BFF"),
+  edge = rgb("3A4F6A"),      -- 1px button border
 }
 UI.FONT = "Fonts\\ARIALN.TTF"
 function UI.Hex(c) return ("|cff%02x%02x%02x"):format(math.floor(c[1] * 255 + .5), math.floor(c[2] * 255 + .5), math.floor(c[3] * 255 + .5)) end
@@ -46,9 +47,10 @@ end
 
 -- flat button fill + hover
 local fills = setmetatable({}, { __mode = "k" })
-function UI.Button(b, tone)
+function UI.Button(b, tone, hover, hoverAlpha)
   local c = UI.C
   tone = tone or c.raised
+  hover = hover or c.red
   local r = fills[b]
   if not r then
     r = {}
@@ -57,5 +59,46 @@ function UI.Button(b, tone)
     fills[b] = r
   end
   r.bg:SetColorTexture(tone[1], tone[2], tone[3], 1)
-  r.hl:SetColorTexture(c.red[1], c.red[2], c.red[3], .35)
+  r.hl:SetColorTexture(hover[1], hover[2], hover[3], hoverAlpha or .35)
+end
+
+-- modern flat button for a template button (UIPanelButtonTemplate draws the red 2004 art).
+-- Hides that art, then slate fill, 1px border, neutral blue hover, clean font. Safe to call twice.
+local modern = setmetatable({}, { __mode = "k" })
+local function Hide(t) if type(t) == "table" and t.SetAlpha then pcall(t.SetAlpha, t, 0) end end
+function UI.Modern(b, tone)
+  if not b then return b end
+  local c = UI.C
+  if not modern[b] then
+    modern[b] = true
+    for _, k in ipairs({ "Left", "Middle", "Right", "LeftDisabled", "MiddleDisabled", "RightDisabled" }) do
+      Hide(b[k])
+      local n = b.GetName and b:GetName()
+      if type(n) == "string" and _G then Hide(_G[n .. k]) end
+    end
+    for _, fn in ipairs({ "GetNormalTexture", "GetPushedTexture", "GetHighlightTexture", "GetDisabledTexture" }) do
+      if b[fn] then
+        local ok, t = pcall(b[fn], b)
+        if ok then Hide(t) end
+      end
+    end
+    -- 1px border
+    local e = c.edge
+    local function Line(p1, p2, w, h)
+      local t = b:CreateTexture(nil, "BORDER")
+      t:SetPoint(p1, b, p1, 0, 0); t:SetPoint(p2, b, p2, 0, 0)
+      if w then t:SetWidth(w) end
+      if h then t:SetHeight(h) end
+      t:SetColorTexture(e[1], e[2], e[3], 1)
+    end
+    Line("TOPLEFT", "TOPRIGHT", nil, 1); Line("BOTTOMLEFT", "BOTTOMRIGHT", nil, 1)
+    Line("TOPLEFT", "BOTTOMLEFT", 1, nil); Line("TOPRIGHT", "BOTTOMRIGHT", 1, nil)
+    local fs = b.GetFontString and b:GetFontString()
+    if fs then
+      if fs.SetFont then pcall(fs.SetFont, fs, UI.FONT, 12, "") end
+      if fs.SetTextColor then fs:SetTextColor(c.text[1], c.text[2], c.text[3], 1) end
+    end
+  end
+  UI.Button(b, tone or c.raised, c.blue, .28)
+  return b
 end

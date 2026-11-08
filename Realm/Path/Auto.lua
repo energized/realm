@@ -87,9 +87,30 @@ local function Conflicts()
   end
 end
 
+-- The quest giver's own list is the truth: when the current accept step is not in it, the compass moves on.
+local function CheckOffer(ids, titles)
+  if not (Path.Route and Path.NoOffer) then return end
+  local _, steps = Path.Route()
+  local who = UnitName and UnitName("npc")
+  if not (steps and who) then return end
+  -- every accept step of this NPC, not only the current one: a skipped step must be able to come back
+  for _, s in ipairs(steps) do
+    if s.t == "A" and s.q and s.npc == who and not Path.InLog(s.q) and not Path.Completed(s.q) then
+      local listed = ids[s.q] or titles[s.n]
+      if listed and Path.Offered then Path.Offered(s.q, true) end
+      Path.NoOffer(s.q, not listed)
+    end
+  end
+end
+
 local function Gossip()
-  if Held() then return end
   local G = C_GossipInfo
+  if G and G.GetAvailableQuests then
+    local ids, titles = {}, {}
+    for _, q in ipairs(G.GetAvailableQuests() or {}) do ids[q.questID] = true; titles[q.title] = true end
+    CheckOffer(ids, titles)
+  end
+  if Held() then return end
   if G and G.GetActiveQuests and On("autoTurnin") then
     for _, q in ipairs(G.GetActiveQuests() or {}) do
       if q.isComplete then G.SelectActiveQuest(q.questID) return end
@@ -103,6 +124,11 @@ local function Gossip()
 end
 
 local function Greeting()
+  if GetNumAvailableQuests and GetAvailableTitle then
+    local titles = {}
+    for i = 1, GetNumAvailableQuests() do titles[GetAvailableTitle(i)] = true end
+    CheckOffer({}, titles)
+  end
   if Held() then return end
   if On("autoTurnin") and GetNumActiveQuests then
     for i = 1, GetNumActiveQuests() do

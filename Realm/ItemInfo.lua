@@ -100,14 +100,7 @@ function II.Enabled()
 end
 
 function II.Money(c)
-  c = math.floor(c or 0)
-  if GetCoinTextureString then return GetCoinTextureString(c) end
-  local g, s, k = math.floor(c / 10000), math.floor(c / 100) % 100, c % 100
-  local out = {}
-  if g > 0 then out[#out + 1] = g .. "g" end
-  if s > 0 or g > 0 then out[#out + 1] = s .. "s" end
-  out[#out + 1] = k .. "c"
-  return table.concat(out, " ")
+  return ns.Coin(c)
 end
 
 local function Ago(t)

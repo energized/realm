@@ -17,6 +17,12 @@ local DEFAULTS = {
   cdLocked = false,
   cdScale = 1,
   cdNext = true,         -- show "next cast" icon if the client offers it
+  buffBar = true,        -- leveling buff alerts
+  buffAlert = true,      -- also print a chat line when a buff goes missing
+  buffLocked = false,
+  healBar = true,        -- click-to-heal bar for you and your party
+  healBelow = 70,        -- cells light up below this percent health
+  healLocked = false,
   mmHide = false,
   mmAngle = 250,
   chars = {},            -- per character: remembered spec (before level 10) or forced spec
@@ -310,6 +316,8 @@ local function Help()
   print("  /boys rotation     rotation guide")
   print("  /boys cd           cooldowns tab; /boys bar toggles the bar")
   print("  /boys prof         profession advice")
+  print("  /boys buffs        buff alerts on/off; also alert, lock, reset, status")
+  print("  /boys heals        heal bar on/off; also below <n>, lock, reset, status")
   print("  /boys spec <name>  set your spec (remembered under level 10), or 'auto'")
   print("  /boys suggest      toggle upgrade popups")
   print("  /boys min <pct>    minimum upgrade percent to suggest")
@@ -362,6 +370,10 @@ SlashCmdList["THEBOYS"] = function(msg)
         Print("spec remembered as " .. class.specs[found].name .. ". Once you reach level " .. TB.SPEC_LEVEL .. " it follows your talents.")
       end
     end
+  elseif cmd == "buffs" or cmd == "buff" then
+    if TB.Buffs then TB.Buffs.Command(rest) end
+  elseif cmd == "heals" or cmd == "heal" then
+    if TB.Heals then TB.Heals.Command(rest) end
   elseif cmd == "macros" or cmd == "macro" then
     if TB.Macros then TB.Macros.Command(rest) end
   elseif cmd == "suggest" then

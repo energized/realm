@@ -53,7 +53,7 @@ local function Items()
       set = function(v) if ns.Bags then ns.Bags.Set(v) end end },
     { key = "mail", label = "Mail helper (EMF): auto-collect and clean up",
       tip = "Opens your mailbox contents for you, deletes a mail only after its items and money are confirmed taken, and keeps an auction tally.",
-      get = function() return ns.DB and ns.DB.emfAuto end, def = false,
+      get = function() return ns.DB and ns.DB.emfAuto end, def = true,
       show = function() return ns.Mail end,
       set = function(v) ns.DB.emfAuto = v and true or false; ns.DB.emfDelete = true end },
   }

@@ -28,6 +28,8 @@ local OPTIONS = {
   { "professions", "Professions helper", "New-class profession picker, trainer stops, and level-up detours." },
   { "compact", "Compact info window", "A shorter info window under the compass." },
   { "boldMarkers", "Large compass markers", "Filled, thicker markers that are easy to spot at a glance." },
+  { "routeStyle", "Route style", "Click to cycle how the route is built. Balanced: the normal guide. EXP speed: less walking, drops low-xp quests sooner. Professions: Balanced plus the professions helper. Safe: skips quests more than 3 levels above you. /path style <name> does the same.",
+    cycle = { "balanced", "exp", "professions", "safe" }, names = { balanced = "Balanced", exp = "EXP speed", professions = "Professions", safe = "Safe" } },
   { "panelMode", "Info window position", "Click to cycle: docked under the compass, top left of the screen, or free to drag (/path unlock first).",
     cycle = { "dock", "topleft", "free" }, names = { dock = "Docked", topleft = "Top left", free = "Free" } },
 }
@@ -73,7 +75,7 @@ local function Build()
       if o.cycle then
         local now, nxt = O[o[1]] or o.cycle[1], o.cycle[1]
         for k, v in ipairs(o.cycle) do if v == now then nxt = o.cycle[k % #o.cycle + 1] end end
-        O[o[1]] = nxt
+        if o[1] == "routeStyle" and Path.SetStyle then Path.SetStyle(nxt) else O[o[1]] = nxt end
       else
         O[o[1]] = not O[o[1]]
       end

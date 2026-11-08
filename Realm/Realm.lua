@@ -23,7 +23,8 @@ local function Print(msg)
   print("|cffe8ab35Realm:|r " .. msg)
 end
 ns.Print = Print
-local function Money(c) return GetCoinTextureString and GetCoinTextureString(c) or (c .. "c") end
+-- money text comes from the shared formatter in Coin.lua (loaded first)
+local function Money(c, h) return ns.Coin(c, h) end
 
 -- GetItemInfo moved to C_Item on newer clients; the old global can be nil there
 local function ItemPrice(link)
@@ -137,6 +138,12 @@ SlashCmdList.REALM = function(msg)
     if ns.Bags then ns.Bags.Command((full:lower():match("^%s*%S+%s*(.-)%s*$"))) end
   elseif msg == "mail" or msg == "emf" then
     if ns.Mail then ns.Mail.Command((full:lower():match("^%s*%S+%s*(.-)%s*$"))) end
+  elseif msg == "mule" then
+    if ns.Mule then ns.Mule.Command((full:match("^%s*%S+%s*(.-)%s*$"))) end   -- keeps capitals: a typed character name must not be lowercased
+  elseif msg == "post" then
+    if ns.Post then ns.Post.Command((full:lower():match("^%s*%S+%s*(.-)%s*$"))) end
+  elseif msg == "replay" then
+    if ns.Replay then ns.Replay.Command((full:lower():match("^%s*%S+%s*(.-)%s*$"))) end
   elseif msg == "tips" or msg == "itemtips" then
     if ns.ItemInfo then ns.ItemInfo.Command(arg) end
   elseif msg == "setup" then
@@ -148,6 +155,7 @@ SlashCmdList.REALM = function(msg)
     Print("Commands: /realm sell | repair | guild | quiet | stats")
     Print("Macros: /realm macros | status | show | spec <name> | force | remove | autoupdate on/off")
     Print("Bags: /realm bags (one bag, alt tabs) | on | off | sort <mode>   Mail: /realm mail (EMF) | collect | auto | delete | tally")
+    Print("Replay: /realm replay (saved PvP fights) | play <n> (watch) | demo (what this is) | info <n> | status | start | stop | on | off | keep <n> | clear")
     Print("Setup: /realm setup (the first-run questions again)")
     Print("Exchange: /realm ex (market window) | /realm ex help | /realm minimap")
     Print("Tracker: /realm view | pins (points of interest) | labels | names | where | window | track [on/off] | share [on/off] (tell the party where your compass is heading) | scale <0.7-3>")

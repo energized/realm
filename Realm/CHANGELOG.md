@@ -1,6 +1,24 @@
 # Realm changelog
 
-## Unreleased
+## 4.10.1
+- Buttons: the Exchange ">" and POST list buttons on the auction house now sit side by side at the bottom right, in a flat dark style with a thin border and a blue hover instead of the red template art (new shared `UI.Modern` style; the other buttons follow in a later version).
+- Bags: the Alts button works again (it sat under the new double-click-to-fold area); the header now double-clicks to fold into the pouch. The character name is large in their class colour, the gold line is bigger with an outline, and the top-right corner has a flat close button and evenly spaced icons.
+- New: Send list. Items Realm holds back (gear you can use, profession goods, quest items) are listed and you choose which may be mailed to your AH alt. Open it from the bag header or the EMF mail window (both show the same list), click a row to allow or remove an item, or turn on Add by click or Remove by click and click items in your bags. Realm asks once about each newly held-back item when you open a mailbox. `/realm mule ok|unok <item>` and `/realm mule list` do the same.
+- Mule: the AH alt is confirmed by logging in on it once, with an optional test letter as extra proof; the keep rules never mail gear or materials your class and professions can use; a game error while mailing no longer causes a Lua error.
+- Replay: open-world PvP only (battlegrounds are no longer recorded); a 1v1 that grows into a bigger fight stays one recording.
+- Fix: the party buff and heal scanners no longer error on the "secret" in-range answer some clients return.
+
+## 4.10.0
+- Fix: the compass no longer sends you to accept a quest the giver cannot offer yet. Each route accept step now waits until its real prerequisite quests are handed in (new Path\Prereqs.lua, built from Questie's quest data: "any of" and "all of" rules). A quest the giver actually lists always opens. Quests missing from the data fall back to the old same-spot rule.
+- Fix: the compass no longer sends you to hand in a quest the game says is not ready, and it skips an "Accept quest" step when the giver has nothing to offer.
+- Compass: quest step text shows as one line and expands on click; profession skill levels have a large line of their own; the Level Profession step tracks each profession being leveled; the compass returns to the quest route as soon as a new home inn is confirmed, including after /reload; trainer visits wait for a new skill level.
+- New: class leveling buff alerts and heal bar with click settings for self and party.
+- Bags and Mail: Drop and Delete changes, coin display, EMF stats, Exchange opens with the auction house.
+
+## 4.9.2
+- New look for the one bag window: dark navy, slightly see-through panel with a thin red-brown border; small yellow "Realm Bags" title; small white character line under it; the gold line on its own row in a larger, plain white font (coloured g, s and c letters); category headers in yellow with a thin red divider across the full width; a thinner yellow grabber bar in the footer; and a dark search box with a red-brown border at the lower right. Bag behaviour, Drop and the Delete button are unchanged.
+
+## 4.9.1
 - Fix: the bag Drop button now works when you loot with full bags. It also reacts when the full-bag message arrives slightly before the loot window opens or just after it closes, accepts the wording variants of that message, and if auto-loot leaves items behind with no free slot it drops without waiting for the message. If the loot window had already closed it tells you to loot again. A failed delete puts the item back. `/realm bags drop debug on|off` prints why a drop did or did not happen.
 - New Drop button in the bag footer (next to Clean up). When it is on and a loot will not fit because your bags are full, the cheapest item in your bags is dropped (destroyed) and the loot is tried again, up to 3 times per loot window. Quest items, items with no vendor price, and rare or better items are never dropped. It is off by default. `/realm bags drop on|off` does the same. The search box is 8 pixels narrower to make room.
 - Party members who run Realm now share gathering finds (herbs, ore, fishing spots, chests) over the tracker channel. A node you find for the first time is sent to your party, and finds from others are saved to your node list and drawn on the tracker map. A spot you already have is ignored. It needs `/realm track on`, and `/realm sharenodes on|off` turns sending and receiving off. Members on an older Realm are not affected. There is no catch-up for members who join late.

@@ -215,24 +215,57 @@ local function NearestFlight(m, x, y, fromPlayer)
   return best, bd
 end
 
+-- A leveling detour holds one or more professions: S.profDetour = { items = { { prof, target, m, x, y, node, zone }, ... } }.
+-- A detour saved by an older version has those fields on the detour itself, so it is wrapped into one item.
+local function Norm(D)
+  if D and not D.items then
+    D.items = { { prof = D.prof, target = D.target, m = D.m, x = D.x, y = D.y, node = D.node, zone = D.zone } }
+  end
+  return D
+end
+local function RankOf(known, name) local k = known[name]; return k and k.rank or 0 end
+local function Names(list)
+  local out = {}
+  for _, it in ipairs(list) do out[#out + 1] = it.prof end
+  return table.concat(out, " + ")
+end
+
 -- the step the compass shows while a leveling detour is active
 function Prof.DetourStep()
   if not On() then return nil end
   local S = State()
-  local D = S and S.profDetour
+  local D = Norm(S and S.profDetour)
   if not D then return nil end
-  local b, dist = Path.Vector(D.m, D.x, D.y)
+  local known = Prof.Known()
+  local left, lines = {}, {}
+  for _, it in ipairs(D.items) do
+    local r = RankOf(known, it.prof)
+    if r >= it.target then
+      lines[#lines + 1] = ("%s%s %d/%d  done|r"):format(UI.H.good, it.prof, r, it.target)
+    else
+      lines[#lines + 1] = ("%s%s %d/%d|r"):format(UI.H.cream, it.prof, r, it.target)
+      left[#left + 1] = it
+    end
+  end
+  local act = left[1]
+  if not act then return nil end                   -- everything is done: the compass is back on the route
+  local skills = table.concat(lines, "      ")        -- drawn large by the compass panel, not in the small step text
+  local b, dist = Path.Vector(act.m, act.x, act.y)
   if b and dist > FAR then
     local here, hd = NearestFlight(nil, nil, nil, true)
-    local there = NearestFlight(D.m, D.x, D.y, false)
+    local there = NearestFlight(act.m, act.x, act.y, false)
     if here and there and hd <= FAR and (here.n ~= there.n or here.m ~= there.m) then
-      return { t = "G", n = "Fly toward " .. (D.zone or "the spot"), npc = here.n, m = here.m, p = { here.x, here.y },
-               tx = ("Take the flight path toward %s to level %s. /path skip cancels the detour."):format(D.zone or "the spot", D.prof),
+      return { t = "G", n = "Fly toward " .. (act.zone or "the spot"), npc = here.n, m = here.m, p = { here.x, here.y },
+               tx = ("Take the flight path toward %s to level %s. /path skip cancels the detour."):format(act.zone or "the spot", act.prof),
+               skills = skills,
                virtual = true, detour = true, verb = "FLIGHT PATH" }
     end
   end
-  return { t = "L", n = ("Level %s to %d"):format(D.prof, D.target), npc = D.node, m = D.m, p = { D.x, D.y },
-           tx = ("Gather %s here until %s reaches %d, then the compass returns to your route. /path skip cancels."):format(D.node, D.prof, D.target),
+  local title = (#left == 1) and ("Level %s to %d"):format(act.prof, act.target) or ("Level " .. Names(left))
+  local after = left[2] and ("the compass moves on to " .. left[2].prof) or "the compass returns to your route"
+  return { t = "L", n = title, npc = act.node, m = act.m, p = { act.x, act.y },
+           tx = ("Gather %s here until %s reaches %d, then %s. /path skip cancels."):format(act.node, act.prof, act.target, after),
+           skills = skills,
            virtual = true, detour = true, verb = "LEVEL PROFESSION" }
 end
 
@@ -246,7 +279,7 @@ function Prof.Skip()
   local S = State()
   if not S then return false end
   if S.profDetour then
-    Print(("detour for %s cancelled."):format(S.profDetour.prof)); S.profDetour = nil
+    Print(("detour for %s cancelled."):format(Names(Norm(S.profDetour).items))); S.profDetour = nil
     return true
   end
   local step = Prof.LearnStop()
@@ -322,27 +355,56 @@ function Prof.OpenPicker()
 end
 
 -- ------------------------------------------------------------ the pace check
-local function Suggest(name, k, need, zone)
-  local S = State()
+-- one detour item for a profession that has fallen behind, or nil (with a chat line saying why)
+local function Plan(name, k, need, zone)
   local target = need
   if k.max and k.max > 0 and k.max < need then target = k.max end
   if k.max and k.max > 0 and k.rank >= k.max then
     Print(("%s is %d, which is the most your current rank allows. %s is paced for about %d: train the next rank at a %s trainer when your level allows."):format(name, k.rank, zone or "This zone", need, name))
-    return
+    return nil
   end
   local spot = Prof.FindSpot(name, k.rank)
   if not spot then
     Print(("%s is %d and %s is paced for about %d, but I have no gathering spot for it on this continent at your level. Level it where you can, or turn this off with /path professions."):format(name, k.rank, zone or "this zone", need))
-    return
+    return nil
   end
   local where = MapName(spot.m)
   Print(("%s is %d and %s is paced for about %d. Closest place to level it: %s in %s."):format(name, k.rank, zone or "this zone", need, spot.node, where))
-  ShowPrompt("Level your " .. name,
-    ("%s is %d. %s is paced for about %d.\n\nClosest place to level it: %s in %s. Route there until %s reaches %d, then back to the quest route?"):format(name, k.rank, zone or "This zone", need, spot.node, where, name, target),
-    { { label = "Route me there", fn = function()
-          S.profDetour = { prof = name, target = target, m = spot.m, x = spot.x, y = spot.y, node = spot.node, zone = where }
-          Path.Changed(true)
-        end },
+  return { prof = name, rank = k.rank, target = target, m = spot.m, x = spot.x, y = spot.y, node = spot.node, zone = where }
+end
+
+-- put the items on the detour; a profession already listed is replaced by its new item
+local function Accept(S, cand)
+  local D = Norm(S.profDetour)
+  local keep = {}
+  for _, it in ipairs(D and D.items or {}) do
+    local replaced = false
+    for _, c in ipairs(cand) do if c.prof == it.prof then replaced = true end end
+    if not replaced then keep[#keep + 1] = it end
+  end
+  for _, c in ipairs(cand) do keep[#keep + 1] = c end
+  S.profDetour = { items = keep }
+  Path.Changed(true)
+end
+
+-- one prompt for every profession that is behind, so two of them share one detour
+local function Offer(S, cand, need, zone)
+  local adding = S.profDetour ~= nil
+  local text
+  if #cand == 1 then
+    local c = cand[1]
+    text = ("%s is %d. %s is paced for about %d.\n\nClosest place to level it: %s in %s. Route there until %s reaches %d, then back to the quest route?"):format(c.prof, c.rank, zone or "This zone", need, c.node, c.zone, c.prof, c.target)
+    if adding then text = text .. " It will be added to the detour you already have." end
+  else
+    local parts, spots = {}, {}
+    for _, c in ipairs(cand) do
+      parts[#parts + 1] = ("%s is %d"):format(c.prof, c.rank)
+      spots[#spots + 1] = ("%s in %s (%s)"):format(c.node, c.zone, c.prof)
+    end
+    text = ("%s. %s is paced for about %d.\n\nClosest places: %s. One window will track each skill and turn a finished one green. Route there until all reach their goal, then back to the quest route?"):format(table.concat(parts, ", "), zone or "This zone", need, table.concat(spots, "; "))
+  end
+  ShowPrompt("Level your " .. Names(cand), text,
+    { { label = adding and "Add to my route" or "Route me there", fn = function() Accept(S, cand) end },
       { label = "Not now", fn = function() end } })
 end
 
@@ -361,27 +423,48 @@ function Prof.Check()
       return
     end
     local known = Prof.Known()
-    local D = S.profDetour
+    local D = Norm(S.profDetour)
     if D then
-      local k = known[D.prof]
-      if k and k.rank >= D.target then
-        S.profDetour = nil
-        Print(("%s is now %d. Back to the route."):format(D.prof, k.rank))
+      -- a finished profession stays on the list (shown green) until every one is done
+      local open = 0
+      for _, it in ipairs(D.items) do
+        local r = RankOf(known, it.prof)
+        if r >= it.target then
+          if not it.done then
+            it.done = true
+            local rest
+            for _, o in ipairs(D.items) do
+              if not o.done and RankOf(known, o.prof) < o.target then rest = rest or o.prof end
+            end
+            Print(("%s is now %d.%s"):format(it.prof, r, rest and (" Next: " .. rest .. ".") or " Back to the route."))
+          end
+        else
+          open = open + 1
+        end
       end
-      return
+      if open == 0 then S.profDetour = nil; return end
     end
     local need, zone, ch = Prof.Need()
     S.profAdvised = S.profAdvised or {}
-    for name in pairs(GATHER) do
-      local k = known[name]
-      if k and need and k.rank + BEHIND <= need then
+    local cand = {}
+    for _, name in ipairs(PRIMARY) do
+      local k = GATHER[name] and known[name]
+      local listed = false
+      if S.profDetour then
+        for _, it in ipairs(S.profDetour.items) do
+          if it.prof == name then listed = true end        -- a finished one is not offered again until the detour ends
+        end
+      end
+      if k and need and not listed and k.rank + BEHIND <= need then
         local key = name .. ":" .. tostring(ch)
         if not S.profAdvised[key] then
           S.profAdvised[key] = true
-          Suggest(name, k, need, zone)
+          local item = Plan(name, k, need, zone)
+          if item then cand[#cand + 1] = item end
         end
       end
     end
+    if #cand > 0 then Offer(S, cand, need, zone) end
   end)
   checking = false
   if not ok then Print("professions check failed: " .. tostring(err)) end
@@ -399,7 +482,11 @@ function Prof.Status()
     Print(("  %s: %s"):format(name, k and ("%d/%d"):format(k.rank, k.max) or "not learned"))
   end
   Print(("  this zone (%s) is paced for about %d"):format(zone or "?", need or 0))
-  if S and S.profDetour then Print(("  detour active: %s to %d"):format(S.profDetour.prof, S.profDetour.target)) end
+  if S and S.profDetour then
+    for _, it in ipairs(Norm(S.profDetour).items) do
+      Print(("  detour active: %s %d/%d"):format(it.prof, RankOf(known, it.prof), it.target))
+    end
+  end
 end
 
 -- ------------------------------------------------------------ slash and events
